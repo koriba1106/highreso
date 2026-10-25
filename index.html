@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <!-- セキュリティ対策: 厳格な Content Security Policy -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.hf.co; worker-src 'self' blob:;">
-  <title>ProImage Studio - AI & High-Precision Image Processor</title>
+  <title>簡易画像処理 by 武庫</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
   <header class="app-header">
     <div class="brand">
       <span class="brand-icon" aria-hidden="true">▣</span>
-      <h1>ProImage Studio</h1>
+      <h1>簡易画像処理 by 武庫</h1>
       <span id="engine-badge" class="badge badge-loading">エンジン初期化中...</span>
     </div>
     <div class="header-actions">
@@ -21,7 +21,7 @@
         <span>📂 画像を開く</span>
         <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
       </label>
-      <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 元画像と比較</button>
+      <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 長押しで元画像表示</button>
       <button id="btn-reset-all" class="btn btn-secondary" disabled>↺ リセット</button>
       <button id="btn-download" class="btn btn-primary" disabled>💾 保存</button>
     </div>
@@ -69,7 +69,7 @@
     <aside class="control-panel" aria-label="画像調整コントロールパネル">
       <!-- プリセット（8種類ワンタッチ適用） -->
       <section class="panel-section">
-        <h2 class="section-title">✨ ワンタッチ・プリセット (8種)</h2>
+        <h2 class="section-title">✨ ワンタッチ（元画像に対して処理）<BR>処理後画像にはパラメータで調整</h2>
         <div class="preset-grid" id="preset-grid">
           <button class="preset-btn" data-preset="ai_hd" disabled>① くっきり高精細</button>
           <button class="preset-btn" data-preset="doc_clear" disabled>② 書類・文字鮮明化</button>
