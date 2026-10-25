@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <!-- セキュリティ対策: 厳格な Content Security Policy -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.hf.co; worker-src 'self' blob:;">
+  <title>ProImage Studio - AI & High-Precision Image Processor</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <!-- トップヘッダー -->
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-icon" aria-hidden="true">▣</span>
+      <h1>ProImage Studio</h1>
+      <span id="engine-badge" class="badge badge-loading">エンジン初期化中...</span>
+    </div>
+    <div class="header-actions">
+      <label for="file-input" class="btn btn-secondary" tabindex="0" role="button" aria-label="画像ファイルを開く">
+        <span>📂 画像を開く</span>
+        <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
+      </label>
+      <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 元画像と比較</button>
+      <button id="btn-reset-all" class="btn btn-secondary" disabled>↺ リセット</button>
+      <button id="btn-download" class="btn btn-primary" disabled>💾 保存</button>
+    </div>
+  </header>
+
+  <!-- メインワークスペース -->
+  <main class="workspace">
+    <!-- プレビュー領域（PC: 左側 / スマホ: 上側） -->
+    <section class="viewport-container" id="drop-zone" aria-label="画像プレビュー領域">
+      <!-- 画像未選択時のガイド -->
+      <div id="empty-state" class="empty-state">
+        <div class="empty-icon" aria-hidden="true">🖼️</div>
+        <p class="empty-title">画像をドラッグ＆ドロップ、または「画像を開く」を選択</p>
+        <p class="empty-sub">対応形式: JPEG, PNG, WebP, BMP (完全ブラウザ内処理・外部送信なし)</p>
+      </div>
+
+      <!-- キャンバススクロール領域 -->
+      <div id="canvas-scroll-area" class="canvas-scroll-area hidden">
+        <div id="canvas-wrapper" class="canvas-wrapper">
+          <canvas id="main-canvas"></canvas>
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- 処理中オーバーレイ -->
+      <div id="processing-overlay" class="processing-overlay hidden" aria-live="assertive">
+        <div class="spinner"></div>
+        <p id="processing-text">画像処理中...</p>
+      </div>
+
+      <!-- フローティング・ステータス＆表示ズームバー（20%〜300% 10%単位） -->
+      <div class="viewport-toolbar">
+        <div class="image-info" id="image-info">未選択</div>
+        <div class="zoom-controls">
+          <button id="btn-zoom-out" class="btn-icon" title="縮小 (-10%)" aria-label="表示を10%縮小">−</button>
+          <input type="range" id="view-zoom-slider" min="20" max="300" step="10" value="100" aria-label="表示倍率スライダー">
+          <button id="btn-zoom-in" class="btn-icon" title="拡大 (+10%)" aria-label="表示を10%拡大">＋</button>
+          <span id="view-zoom-label" class="zoom-label">100%</span>
+          <button id="btn-zoom-fit" class="btn-text" title="100%等倍に戻す">100%</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- コントロールパネル（PC: 右側 / スマホ: 下側） -->
+    <aside class="control-panel" aria-label="画像調整コントロールパネル">
+      <!-- プリセット（8種類ワンタッチ適用） -->
+      <section class="panel-section">
+        <h2 class="section-title">✨ ワンタッチ・プリセット (8種)</h2>
+        <div class="preset-grid" id="preset-grid">
+          <button class="preset-btn" data-preset="ai_hd" disabled>① くっきり高精細</button>
+          <button class="preset-btn" data-preset="doc_clear" disabled>② 書類・文字鮮明化</button>
+          <button class="preset-btn" data-preset="portrait" disabled>③ ポートレート美肌</button>
+          <button class="preset-btn" data-preset="vivid" disabled>④ 風景・ビビッド</button>
+          <button class="preset-btn" data-preset="dark_fix" disabled>⑤ 暗所・逆光補正</button>
+          <button class="preset-btn" data-preset="sns_up" disabled>⑥ SNS用 2倍拡大</button>
+          <button class="preset-btn" data-preset="retro" disabled>⑦ シネマ・落ち着き</button>
+          <button class="preset-btn" data-preset="light_save" disabled>⑧ 軽量・縮小(0.5倍)</button>
+        </div>
+      </section>
+
+      <!-- パラメータスライダー群 -->
+      <section class="panel-section">
+        <div class="section-header-row">
+          <h2 class="section-title">🎛️ パラメータ調整</h2>
+          <span class="section-sub-hint">※項目名ダブルクリックで個別リセット</span>
+        </div>
+
+        <!-- ① 画像を高解像度化 -->
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-superres" data-default="0" title="ダブルクリックで初期値(0)に戻す">
+            <label for="param-superres">① 高解像度化 (AI / 密度補間)</label>
+            <span id="val-superres" class="param-value">OFF (0)</span>
+          </div>
+          <input type="range" id="param-superres" class="param-slider" min="0" max="100" step="1" value="0" disabled>
+        </div>
+
+        <!-- ② 画像の高精細化 -->
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-detail" data-default="0" title="ダブルクリックで初期値(0)に戻す">
+            <label for="param-detail">② 高精細化 (マイクロコントラスト)</label>
+            <span id="val-detail" class="param-value">0</span>
+          </div>
+          <input type="range" id="param-detail" class="param-slider" min="0" max="100" step="1" value="0" disabled>
+        </div>
+
+        <!-- 新設: シャープネス (1〜10段階 + OFF) -->
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-sharpness" data-default="0" title="ダブルクリックで初期値(OFF)に戻す">
+            <label for="param-sharpness">★ シャープネス (1〜10段階)</label>
+            <span id="val-sharpness" class="param-value">OFF</span>
+          </div>
+          <input type="range" id="param-sharpness" class="param-slider" min="0" max="10" step="1" value="0" list="sharpness-ticks" disabled>
+          <datalist id="sharpness-ticks">
+            <option value="0"></option>
+            <option value="1"></option>
+            <option value="5"></option>
+            <option value="10"></option>
+          </datalist>
+          <p class="control-hint">※0でOFF、1〜10の10段階で輪郭エッジを鋭く強調します</p>
+        </div>
+
+        <!-- ③ サイズ変更 (0.1単位) -->
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-scale" data-default="1.0" title="ダブルクリックで初期値(1.0x)に戻す">
+            <label for="param-scale">③ サイズ変更 (出力倍率 0.1単位)</label>
+            <span id="val-scale" class="param-value">1.0x</span>
+          </div>
+          <input type="range" id="param-scale" class="param-slider" min="0.1" max="3.0" step="0.1" value="1.0" disabled>
+        </div>
+
+        <!-- ④ 明るさ・コントラスト調整 -->
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-brightness" data-default="0" title="ダブルクリックで初期値(0)に戻す">
+            <label for="param-brightness">④-A 明るさ (Brightness)</label>
+            <span id="val-brightness" class="param-value">0</span>
+          </div>
+          <input type="range" id="param-brightness" class="param-slider" min="-100" max="100" step="1" value="0" disabled>
+        </div>
+
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-contrast" data-default="0" title="ダブルクリックで初期値(0)に戻す">
+            <label for="param-contrast">④-B コントラスト (Contrast)</label>
+            <span id="val-contrast" class="param-value">0</span>
+          </div>
+          <input type="range" id="param-contrast" class="param-slider" min="-100" max="100" step="1" value="0" disabled>
+        </div>
+      </section>
+
+      <!-- ⑤ 範囲指定によるモザイク処理 -->
+      <section class="panel-section">
+        <div class="section-header-row">
+          <h2 class="section-title">⑤ 範囲指定モザイク処理</h2>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-mosaic-mode" disabled>
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">範囲選択モード</span>
+          </label>
+        </div>
+        <p class="control-hint">「範囲選択モード」をONにしてプレビュー画像上をドラッグするとモザイク範囲を追加できます（複数箇所対応）。</p>
+
+        <div class="control-group">
+          <div class="control-header" data-reset-target="param-mosaic" data-default="15" title="ダブルクリックで初期値(15px)に戻す">
+            <label for="param-mosaic">モザイク粗さ (ブロックサイズ)</label>
+            <span id="val-mosaic" class="param-value">15px</span>
+          </div>
+          <input type="range" id="param-mosaic" class="param-slider" min="2" max="80" step="1" value="15" disabled>
+        </div>
+
+        <div class="mosaic-actions">
+          <button id="btn-mosaic-undo" class="btn btn-secondary btn-sm" disabled>1つ戻す</button>
+          <button id="btn-mosaic-clear" class="btn btn-secondary btn-sm" disabled>範囲を全消去</button>
+          <span id="mosaic-count" class="mosaic-count">選択: 0箇所</span>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- トースト通知 -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- コアエンジンの読み込みとUIバインディング -->
+  <script type="module">
+    import { ImageCoreEngine, PRESETS } from './engine.js';
+
+    const els = {
+      fileInput: document.getElementById('file-input'),
+      dropZone: document.getElementById('drop-zone'),
+      emptyState: document.getElementById('empty-state'),
+      scrollArea: document.getElementById('canvas-scroll-area'),
+      canvasWrapper: document.getElementById('canvas-wrapper'),
+      mainCanvas: document.getElementById('main-canvas'),
+      overlayCanvas: document.getElementById('overlay-canvas'),
+      processingOverlay: document.getElementById('processing-overlay'),
+      processingText: document.getElementById('processing-text'),
+      engineBadge: document.getElementById('engine-badge'),
+      imageInfo: document.getElementById('image-info'),
+      btnCompare: document.getElementById('btn-compare'),
+      btnResetAll: document.getElementById('btn-reset-all'),
+      btnDownload: document.getElementById('btn-download'),
+      // 表示ズーム (20%〜300% 10%単位)
+      viewZoomSlider: document.getElementById('view-zoom-slider'),
+      viewZoomLabel: document.getElementById('view-zoom-label'),
+      btnZoomIn: document.getElementById('btn-zoom-in'),
+      btnZoomOut: document.getElementById('btn-zoom-out'),
+      btnZoomFit: document.getElementById('btn-zoom-fit'),
+      // パラメータスライダー
+      paramSuperres: document.getElementById('param-superres'),
+      paramDetail: document.getElementById('param-detail'),
+      paramSharpness: document.getElementById('param-sharpness'),
+      paramScale: document.getElementById('param-scale'),
+      paramBrightness: document.getElementById('param-brightness'),
+      paramContrast: document.getElementById('param-contrast'),
+      paramMosaic: document.getElementById('param-mosaic'),
+      // パラメータ表示ラベル
+      valSuperres: document.getElementById('val-superres'),
+      valDetail: document.getElementById('val-detail'),
+      valSharpness: document.getElementById('val-sharpness'),
+      valScale: document.getElementById('val-scale'),
+      valBrightness: document.getElementById('val-brightness'),
+      valContrast: document.getElementById('val-contrast'),
+      valMosaic: document.getElementById('val-mosaic'),
+      // モザイク操作
+      toggleMosaicMode: document.getElementById('toggle-mosaic-mode'),
+      btnMosaicUndo: document.getElementById('btn-mosaic-undo'),
+      btnMosaicClear: document.getElementById('btn-mosaic-clear'),
+      mosaicCount: document.getElementById('mosaic-count'),
+      presetBtns: document.querySelectorAll('.preset-btn'),
+      resetHeaders: document.querySelectorAll('.control-header[data-reset-target]'),
+      toast: document.getElementById('toast')
+    };
+
+    const engine = new ImageCoreEngine(els.mainCanvas);
+    let viewZoom = 100; // 20% ~ 300% (10% step)
+    let isDrawingMosaic = false;
+    let startPt = { x: 0, y: 0 };
+    let currentRect = null;
+    let renderDebounceTimer = null;
+
+    function showToast(msg, duration = 2800) {
+      els.toast.textContent = msg;
+      els.toast.classList.remove('hidden');
+      clearTimeout(els.toast._timer);
+      els.toast._timer = setTimeout(() => els.toast.classList.add('hidden'), duration);
+    }
+
+    // 初回起動時のAI / WebGPU・WASMエンジン初期化
+    async function initApp() {
+      try {
+        const status = await engine.initializeRuntime();
+        els.engineBadge.textContent = status.label;
+        els.engineBadge.className = `badge ${status.isWebGPU ? 'badge-ready' : 'badge-wasm'}`;
+      } catch (_) {
+        els.engineBadge.textContent = 'WASM High-Precision Ready';
+        els.engineBadge.className = 'badge badge-wasm';
+      }
+    }
+    initApp();
+
+    // ファイル読み込み処理（マジックバイト検証含む）
+    async function handleFile(file) {
+      if (!file) return;
+      setLoading(true, '画像を安全に検証・展開中...');
+      try {
+        const meta = await engine.loadImage(file);
+        els.emptyState.classList.add('hidden');
+        els.scrollArea.classList.remove('hidden');
+        enableControls(true);
+        resetParametersUI();
+        await triggerProcess();
+        showToast(`画像を読み込みました (${meta.width} × ${meta.height} px)`);
+      } catch (err) {
+        showToast(`エラー: ${err.message}`, 4500);
+      } finally {
+        setLoading(false);
+        els.fileInput.value = ''; // 同じファイルの再選択を許容
+      }
+    }
+
+    function enableControls(enabled) {
+      const inputs = [
+        els.btnCompare, els.btnResetAll, els.btnDownload,
+        els.paramSuperres, els.paramDetail, els.paramSharpness,
+        els.paramScale, els.paramBrightness, els.paramContrast,
+        els.paramMosaic, els.toggleMosaicMode
+      ];
+      inputs.forEach(el => { el.disabled = !enabled; });
+      els.presetBtns.forEach(btn => { btn.disabled = !enabled; });
+      updateMosaicButtonsUI();
+    }
+
+    function updateMosaicButtonsUI() {
+      const count = engine.getMosaicRegions().length;
+      els.mosaicCount.textContent = `選択: ${count}箇所`;
+      els.btnMosaicUndo.disabled = count === 0;
+      els.btnMosaicClear.disabled = count === 0;
+    }
+
+    function resetParametersUI() {
+      els.paramSuperres.value = 0;
+      els.paramDetail.value = 0;
+      els.paramSharpness.value = 0;
+      els.paramScale.value = 1.0;
+      els.paramBrightness.value = 0;
+      els.paramContrast.value = 0;
+      els.paramMosaic.value = 15;
+      els.presetBtns.forEach(b => b.classList.remove('active'));
+      updateParamLabels();
+      updateMosaicButtonsUI();
+    }
+
+    function updateParamLabels() {
+      const sr = Number(els.paramSuperres.value);
+      els.valSuperres.textContent = sr === 0 ? 'OFF (0)' : `Lv.${sr}`;
+
+      els.valDetail.textContent = els.paramDetail.value;
+
+      const sh = Number(els.paramSharpness.value);
+      els.valSharpness.textContent = sh === 0 ? 'OFF' : `Lv.${sh} / 10`;
+
+      els.valScale.textContent = `${Number(els.paramScale.value).toFixed(1)}x`;
+
+      const br = Number(els.paramBrightness.value);
+      els.valBrightness.textContent = br > 0 ? `+${br}` : `${br}`;
+
+      const ct = Number(els.paramContrast.value);
+      els.valContrast.textContent = ct > 0 ? `+${ct}` : `${ct}`;
+
+      els.valMosaic.textContent = `${els.paramMosaic.value}px`;
+    }
+
+    function getParamsFromUI() {
+      return {
+        superResolution: Number(els.paramSuperres.value),
+        detail: Number(els.paramDetail.value),
+        sharpness: Number(els.paramSharpness.value),
+        scale: Number(els.paramScale.value),
+        brightness: Number(els.paramBrightness.value),
+        contrast: Number(els.paramContrast.value),
+        mosaicSize: Number(els.paramMosaic.value)
+      };
+    }
+
+    function scheduleProcess(immediate = false) {
+      updateParamLabels();
+      clearTimeout(renderDebounceTimer);
+      if (immediate) {
+        triggerProcess();
+      } else {
+        renderDebounceTimer = setTimeout(() => triggerProcess(), 32);
+      }
+    }
+
+    async function triggerProcess() {
+      if (!engine.hasImage()) return;
+      const params = getParamsFromUI();
+      const isHeavy = params.superResolution >= 60 || params.scale >= 2.2;
+      if (isHeavy) {
+        setLoading(true, '高解像度・高精細レンダリング中...');
+      }
+      try {
+        await new Promise(r => requestAnimationFrame(r));
+        const resultInfo = await engine.process(params);
+        if (resultInfo) {
+          syncOverlaySize();
+          applyViewZoom();
+          els.imageInfo.textContent = `出力: ${resultInfo.width} × ${resultInfo.height} px (${params.scale.toFixed(1)}x)`;
+        }
+      } catch (err) {
+        showToast(`処理エラー: ${err.message}`);
+      } finally {
+        if (isHeavy) setLoading(false);
+      }
+    }
+
+    // 表示ズーム（20%〜300% 10%単位）の適用
+    function applyViewZoom(newZoom) {
+      if (typeof newZoom === 'number') {
+        viewZoom = Math.min(300, Math.max(20, Math.round(newZoom / 10) * 10));
+        els.viewZoomSlider.value = viewZoom;
+      } else {
+        viewZoom = Number(els.viewZoomSlider.value);
+      }
+      els.viewZoomLabel.textContent = `${viewZoom}%`;
+
+      if (!engine.hasImage()) return;
+      const w = els.mainCanvas.width;
+      const h = els.mainCanvas.height;
+      const displayW = Math.max(1, Math.round(w * (viewZoom / 100)));
+      const displayH = Math.max(1, Math.round(h * (viewZoom / 100)));
+
+      els.canvasWrapper.style.width = `${displayW}px`;
+      els.canvasWrapper.style.height = `${displayH}px`;
+      drawOverlay();
+    }
+
+    function syncOverlaySize() {
+      if (els.overlayCanvas.width !== els.mainCanvas.width || els.overlayCanvas.height !== els.mainCanvas.height) {
+        els.overlayCanvas.width = els.mainCanvas.width;
+        els.overlayCanvas.height = els.mainCanvas.height;
+      }
+    }
+
+    // モザイク選択枠のオーバーレイ描画
+    function drawOverlay() {
+      const ctx = els.overlayCanvas.getContext('2d');
+      const w = els.overlayCanvas.width;
+      const h = els.overlayCanvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      if (!els.toggleMosaicMode.checked && !currentRect) return;
+
+      const regions = engine.getMosaicRegions();
+      ctx.save();
+      const lineScale = Math.max(1.5, 2 / (viewZoom / 100));
+      ctx.lineWidth = lineScale;
+      ctx.strokeStyle = 'rgba(37, 99, 235, 0.9)';
+      ctx.fillStyle = 'rgba(37, 99, 235, 0.12)';
+      ctx.setLineDash([6, 4]);
+
+      regions.forEach(r => {
+        const rx = r.x * w;
+        const ry = r.y * h;
+        const rw = r.w * w;
+        const rh = r.h * h;
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+      });
+
+      if (currentRect) {
+        ctx.strokeStyle = '#dc2626';
+        ctx.fillStyle = 'rgba(220, 38, 38, 0.18)';
+        ctx.setLineDash([]);
+        ctx.fillRect(currentRect.x, currentRect.y, currentRect.w, currentRect.h);
+        ctx.strokeRect(currentRect.x, currentRect.y, currentRect.w, currentRect.h);
+      }
+      ctx.restore();
+    }
+
+    function setLoading(isLoading, text = '処理中...') {
+      els.processingText.textContent = text;
+      els.processingOverlay.classList.toggle('hidden', !isLoading);
+    }
+
+    // ====== イベントリスナー登録 ======
+
+    // ファイル選択・ドラッグ＆ドロップ
+    els.fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+    els.dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      els.dropZone.classList.add('drag-over');
+    });
+    els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('drag-over'));
+    els.dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      els.dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    // パラメータスライダー操作
+    [
+      els.paramSuperres, els.paramDetail, els.paramSharpness,
+      els.paramScale, els.paramBrightness, els.paramContrast, els.paramMosaic
+    ].forEach(slider => {
+      slider.addEventListener('input', () => {
+        els.presetBtns.forEach(b => b.classList.remove('active'));
+        scheduleProcess(false);
+      });
+    });
+
+    // 各スライダーヘッダーのダブルクリックで個別リセット
+    els.resetHeaders.forEach(header => {
+      header.addEventListener('dblclick', () => {
+        const targetId = header.dataset.resetTarget;
+        const defaultVal = header.dataset.default;
+        const inputEl = document.getElementById(targetId);
+        if (inputEl && !inputEl.disabled) {
+          inputEl.value = defaultVal;
+          els.presetBtns.forEach(b => b.classList.remove('active'));
+          scheduleProcess(true);
+        }
+      });
+    });
+
+    // 8種類のプリセットボタン
+    els.presetBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.preset;
+        const preset = PRESETS[key];
+        if (!preset || !engine.hasImage()) return;
+
+        els.presetBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        els.paramSuperres.value = preset.superResolution;
+        els.paramDetail.value = preset.detail;
+        els.paramSharpness.value = preset.sharpness;
+        els.paramScale.value = preset.scale;
+        els.paramBrightness.value = preset.brightness;
+        els.paramContrast.value = preset.contrast;
+
+        showToast(`プリセット「${preset.name}」を適用しました`);
+        scheduleProcess(true);
+      });
+    });
+
+    // 元画像と比較ボタン（押している間だけ元画像を表示）
+    const startCompare = e => {
+      if (!engine.hasImage()) return;
+      e.preventDefault();
+      engine.renderOriginalPreview();
+    };
+    const endCompare = e => {
+      if (!engine.hasImage()) return;
+      e.preventDefault();
+      engine.restoreProcessedPreview();
+    };
+    els.btnCompare.addEventListener('pointerdown', startCompare);
+    els.btnCompare.addEventListener('pointerup', endCompare);
+    els.btnCompare.addEventListener('pointerleave', endCompare);
+    els.btnCompare.addEventListener('pointercancel', endCompare);
+
+    // 表示ズーム（20%〜300% 10%単位）
+    els.viewZoomSlider.addEventListener('input', () => applyViewZoom());
+    els.btnZoomIn.addEventListener('click', () => applyViewZoom(viewZoom + 10));
+    els.btnZoomOut.addEventListener('click', () => applyViewZoom(viewZoom - 10));
+    els.btnZoomFit.addEventListener('click', () => applyViewZoom(100));
+
+    // モザイク範囲選択モード切り替え
+    els.toggleMosaicMode.addEventListener('change', () => {
+      const active = els.toggleMosaicMode.checked;
+      els.overlayCanvas.style.cursor = active ? 'crosshair' : 'default';
+      drawOverlay();
+      if (active) {
+        showToast('画像上をドラッグしてモザイク範囲を指定してください');
+      }
+    });
+
+    function getCanvasCoordinates(e) {
+      const rect = els.overlayCanvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
+      const scaleX = els.overlayCanvas.width / rect.width;
+      const scaleY = els.overlayCanvas.height / rect.height;
+      return {
+        x: Math.max(0, Math.min(els.overlayCanvas.width, (e.clientX - rect.left) * scaleX)),
+        y: Math.max(0, Math.min(els.overlayCanvas.height, (e.clientY - rect.top) * scaleY))
+      };
+    }
+
+    els.overlayCanvas.addEventListener('pointerdown', e => {
+      if (!els.toggleMosaicMode.checked || !engine.hasImage()) return;
+      e.preventDefault();
+      els.overlayCanvas.setPointerCapture(e.pointerId);
+      isDrawingMosaic = true;
+      startPt = getCanvasCoordinates(e);
+      currentRect = { x: startPt.x, y: startPt.y, w: 0, h: 0 };
+      drawOverlay();
+    });
+
+    els.overlayCanvas.addEventListener('pointermove', e => {
+      if (!isDrawingMosaic) return;
+      e.preventDefault();
+      const pt = getCanvasCoordinates(e);
+      currentRect = {
+        x: Math.min(startPt.x, pt.x),
+        y: Math.min(startPt.y, pt.y),
+        w: Math.abs(pt.x - startPt.x),
+        h: Math.abs(pt.y - startPt.y)
+      };
+      drawOverlay();
+    });
+
+    function finishMosaicSelection(e) {
+      if (!isDrawingMosaic) return;
+      isDrawingMosaic = false;
+      if (els.overlayCanvas.hasPointerCapture(e.pointerId)) {
+        els.overlayCanvas.releasePointerCapture(e.pointerId);
+      }
+      if (currentRect && currentRect.w > 4 && currentRect.h > 4) {
+        const w = els.overlayCanvas.width;
+        const h = els.overlayCanvas.height;
+        engine.addMosaicRegion({
+          x: currentRect.x / w,
+          y: currentRect.y / h,
+          w: currentRect.w / w,
+          h: currentRect.h / h
+        });
+        updateMosaicButtonsUI();
+        scheduleProcess(true);
+      }
+      currentRect = null;
+      drawOverlay();
+    }
+
+    els.overlayCanvas.addEventListener('pointerup', finishMosaicSelection);
+    els.overlayCanvas.addEventListener('pointercancel', finishMosaicSelection);
+
+    els.btnMosaicUndo.addEventListener('click', () => {
+      engine.undoMosaicRegion();
+      updateMosaicButtonsUI();
+      scheduleProcess(true);
+    });
+
+    els.btnMosaicClear.addEventListener('click', () => {
+      engine.clearMosaicRegions();
+      updateMosaicButtonsUI();
+      scheduleProcess(true);
+    });
+
+    els.btnResetAll.addEventListener('click', () => {
+      engine.clearMosaicRegions();
+      resetParametersUI();
+      applyViewZoom(100);
+      scheduleProcess(true);
+      showToast('すべての設定を初期状態に戻しました');
+    });
+
+    els.btnDownload.addEventListener('click', async () => {
+      if (!engine.hasImage()) return;
+      try {
+        const blobUrl = await engine.exportImageBlobUrl('image/png');
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `ProImage_${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
+        showToast('画像を保存しました');
+      } catch (_) {
+        showToast('保存に失敗しました');
+      }
+    });
+  </script>
+</body>
+</html>
