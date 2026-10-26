@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <!-- GitHub Pages / WebAssembly / WebWorker / Hugging Face CDN リダイレクト完全対応CSP -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net https://*.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' blob: data: https://cdn.jsdelivr.net https://*.jsdelivr.net https://huggingface.co https://*.huggingface.co https://*.hf.co; worker-src 'self' blob: https://cdn.jsdelivr.net https://*.jsdelivr.net;">
+  <!-- セキュリティ対策: WebAssembly ('wasm-unsafe-eval') と HuggingFace CDN 通信を正しく許可 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' blob: data: https://cdn.jsdelivr.net https://huggingface.co https://*.huggingface.co https://*.hf.co; worker-src 'self' blob: https://cdn.jsdelivr.net;">
   <title>AI簡易画像処理 by 武庫</title>
-  <link rel="stylesheet" href="./style.css?v=2.1">
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <!-- トップヘッダー -->
   <header class="app-header">
     <div class="brand">
       <span class="brand-icon" aria-hidden="true">▣</span>
-      <h1>Local AI 簡易画像処理 by 武庫 ver1.4</h1>
-      <span id="engine-badge" class="badge badge-loading">エンジン起動中...</span>
+      <h1>Local AI 簡易画像処理 by 武庫 ver1.5</h1>
+      <span id="engine-badge" class="badge badge-loading">エンジン初期化中...</span>
     </div>
     <div class="header-actions">
       <label for="file-input" class="btn btn-secondary" tabindex="0" role="button" aria-label="画像ファイルを開く">
@@ -22,7 +22,7 @@
         <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
       </label>
       <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 元画像と比較</button>
-      <button id="btn-reset-all" class="btn btn-secondary" disabled>↺ リセット</button>
+      <button id="btn-reset-all" class="btn btn-secondary" disabled>↺ 全リセット</button>
       <button id="btn-download" class="btn btn-primary" disabled>💾 保存</button>
     </div>
   </header>
@@ -74,27 +74,24 @@
         <!-- プリセット最上部: ディープラーニングモデル (Swin2SR) 専用ボックス -->
         <div class="ai-sr-box">
           <div class="ai-sr-status-row">
-            <span class="ai-sr-label">Swin2SR AIモデル:</span>
+            <span class="ai-sr-label">Swin2SR AI状態:</span>
             <div class="ai-status-right">
-              <span id="swin2sr-status-badge" class="ai-status-pill status-unloaded">確認待ち</span>
-              <button id="btn-reopen-consent" class="btn-link hidden" type="button" title="AIモデルのダウンロード確認画面を再度開きます">設定変更</button>
+              <span id="swin2sr-status-badge" class="ai-status-pill status-unloaded">確認中...</span>
+              <button id="btn-ai-pref-reset" class="btn-link" title="AIモデルのダウンロード設定(Yes/No)を再選択します">⚙設定変更</button>
             </div>
           </div>
-
-          <button id="btn-swin2sr" class="btn btn-ai-sr" disabled>
-            🧠 AI超解像 (Swin2SR) で推論実行
+          <button id="btn-swin2sr" class="btn btn-ai-sr">
+            🧠 AI超解像 (Swin2SR) を準備 / 推論実行
           </button>
-
-          <!-- ダウンロード進捗バー（モデル取得中に表示） -->
+          <!-- ダウンロード進捗バー -->
           <div id="ai-progress-wrap" class="ai-progress-wrap hidden">
             <div class="ai-progress-bar">
               <div id="ai-progress-fill" class="ai-progress-fill"></div>
             </div>
-            <span id="ai-progress-text" class="ai-progress-text">モデル準備中...</span>
+            <span id="ai-progress-text" class="ai-progress-text">モデル取得中... 0%</span>
           </div>
-
           <p id="ai-sr-note" class="control-hint">
-            処理速度は画像サイズと性能によりGPU搭載ありで数秒、非搭載なら５分（途中でフリーズの可能性あり） ※画像を開いた後、上のボタンで超解像を実行します（AI未導入時は高速数式アルゴリズムで代替処理）。
+            ※選択設定(Yes/No)はブラウザに記憶され、次回アクセス時は確認をスキップします。
           </p>
         </div>
 
@@ -179,6 +176,55 @@
         </div>
       </section>
 
+      <!-- 新設: ✂️ トリミング（切り抜き）機能（ドラッグ / XYWH座標 / 比率プリセット） -->
+      <section class="panel-section">
+        <div class="section-header-row">
+          <h2 class="section-title">✂️ トリミング (切り抜き)</h2>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-crop-mode" disabled>
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">範囲指定モード</span>
+          </label>
+        </div>
+        <p class="control-hint">画像上のドラッグ、比率プリセット、またはXY座標・縦横(W/H)の直接入力で範囲を指定できます。</p>
+
+        <!-- 比率プリセットボタン群 -->
+        <div class="crop-ratio-grid" id="crop-ratio-grid">
+          <button type="button" class="ratio-btn active" data-ratio="free" disabled>自由</button>
+          <button type="button" class="ratio-btn" data-ratio="1:1" disabled>1:1</button>
+          <button type="button" class="ratio-btn" data-ratio="4:3" disabled>4:3</button>
+          <button type="button" class="ratio-btn" data-ratio="16:9" disabled>16:9</button>
+          <button type="button" class="ratio-btn" data-ratio="3:2" disabled>3:2</button>
+          <button type="button" class="ratio-btn" data-ratio="9:16" disabled>9:16</button>
+        </div>
+
+        <!-- XY座標・幅(W)・高さ(H) 数値入力 -->
+        <div class="crop-coords-grid">
+          <div class="coord-field">
+            <label for="crop-x">X (px)</label>
+            <input type="number" id="crop-x" min="0" step="1" value="0" disabled>
+          </div>
+          <div class="coord-field">
+            <label for="crop-y">Y (px)</label>
+            <input type="number" id="crop-y" min="0" step="1" value="0" disabled>
+          </div>
+          <div class="coord-field">
+            <label for="crop-w">幅 W (px)</label>
+            <input type="number" id="crop-w" min="4" step="1" value="0" disabled>
+          </div>
+          <div class="coord-field">
+            <label for="crop-h">高 H (px)</label>
+            <input type="number" id="crop-h" min="4" step="1" value="0" disabled>
+          </div>
+        </div>
+
+        <div class="crop-actions">
+          <button id="btn-crop-apply" class="btn btn-primary btn-sm" disabled>✂️ トリミングを適用</button>
+          <button id="btn-crop-reset" class="btn btn-secondary btn-sm" disabled>元に戻す(解除)</button>
+          <span id="crop-status-label" class="mosaic-count">未適用</span>
+        </div>
+      </section>
+
       <!-- ⑤ 範囲指定によるモザイク処理 -->
       <section class="panel-section">
         <div class="section-header-row">
@@ -212,24 +258,30 @@
   <footer class="app-footer">
     <span>🔒 プライバシー保護: 画像データはブラウザ内でのみ処理され外部サーバーへ一切送信されません</span>
     <span class="footer-sep">|</span>
-    <span>Licenses: App Code (MIT) / Transformers.js (Apache-2.0) / ONNX Runtime Web (MIT) / Swin2SR Model (Apache-2.0)</span>
+    <span>Licenses: Application Code (MIT) / @xenova/transformers (Apache-2.0) / ONNX Runtime Web (MIT) / Swin2SR Model (Apache-2.0)</span>
   </footer>
 
-  <!-- 初回起動時（および再設定時）に表示される Yes / No 明示確認モーダル -->
+  <!-- 初回起動時 / 設定変更時の Yes / No 明示確認モーダル -->
   <div id="ai-consent-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-card">
-      <h3 id="modal-title" class="modal-title">🧠 ディープラーニングモデル (Swin2SR) の初回ダウンロード確認</h3>
+      <h3 id="modal-title" class="modal-title">🧠 ディープラーニングモデル (Swin2SR) のダウンロード確認</h3>
       <p class="modal-desc">
-        超解像AIモデル（<code>Xenova/swin2SR-classical-sr-x2-64</code>）およびAI推論ライブラリをブラウザにダウンロードして利用可能にしますか？
+        超解像AIモデル（<code>Xenova/swin2SR-classical-sr-x2-64</code>）をブラウザにダウンロードして利用可能にしますか？
       </p>
       <ul class="modal-list">
-        <li><strong>Yes を選択:</strong> 約 20MB のAIモデルを取得し、ディープラーニング超解像機能を有効化します（ブラウザにキャッシュされ、次回以降は高速に起動します）。</li>
-        <li><strong>No を選択:</strong> AIモデルのダウンロードを行わず、内蔵の<strong>「高速・軽量な数式アルゴリズム」</strong>のみで軽快に動作します（後からいつでも有効化できます）。</li>
-        <li><strong>安全性:</strong> どちらを選んでも、画像処理はすべてお使いの端末内（ローカル）で完結します。</li>
+        <li><strong>初回通信量:</strong> 約 15MB 〜 30MB（ブラウザにキャッシュされ、次回以降の通信は発生しません）</li>
+        <li><strong>安全性:</strong> 推論はお使いの端末内（WebGPU / WASM）で完結し、画像が外部サーバーへ送信されることはありません。</li>
+        <li><strong>「No」を選択した場合:</strong> AIモデルのダウンロードを行わず、内蔵の<strong>「高速・軽量な数式アルゴリズム」</strong>で高解像度・高精細化処理を行います。</li>
       </ul>
+      <div class="modal-remember-box">
+        <label class="checkbox-label">
+          <input type="checkbox" id="chk-remember-consent" checked>
+          <span>この選択を記憶し、2回目以降のアクセス時は確認画面をスキップする</span>
+        </label>
+      </div>
       <div class="modal-actions">
-        <button id="btn-consent-no" class="btn btn-secondary" type="button">No (ダウンロードせず高速数式モードで利用)</button>
-        <button id="btn-consent-yes" class="btn btn-primary" type="button">Yes (ダウンロードしてSwin2SRを有効化)</button>
+        <button id="btn-consent-no" class="btn btn-secondary">No (利用しない・高速数式アルゴリズムで処理)</button>
+        <button id="btn-consent-yes" class="btn btn-primary">Yes (ダウンロードしてSwin2SRを利用する)</button>
       </div>
     </div>
   </div>
@@ -237,32 +289,9 @@
   <!-- トースト通知 -->
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
-  <!-- メインスクリプト（動的インポート＋自己診断フェイルセーフ構造） -->
+  <!-- コアエンジンの読み込みとUIバインディング -->
   <script type="module">
-    const engineBadgeEl = document.getElementById('engine-badge');
-    const swinBadgeEl = document.getElementById('swin2sr-status-badge');
-    const toastEl = document.getElementById('toast');
-
-    function showToast(msg, duration = 3400) {
-      toastEl.textContent = msg;
-      toastEl.classList.remove('hidden');
-      clearTimeout(toastEl._timer);
-      toastEl._timer = setTimeout(() => toastEl.classList.add('hidden'), duration);
-    }
-
-    // 万が一 engine.js の配置漏れやファイル名不一致があった場合も無言停止させず通知する
-    let engineModule;
-    try {
-      engineModule = await import('./engine.js?v=2.1');
-    } catch (bootErr) {
-      engineBadgeEl.textContent = '⚠️ engine.js 読込エラー';
-      engineBadgeEl.className = 'badge badge-error';
-      swinBadgeEl.textContent = '初期化失敗';
-      showToast('engine.js を読み込めませんでした。同一フォルダに engine.js (小文字) が配置されているか確認してください。', 10000);
-      throw bootErr;
-    }
-
-    const { ImageCoreEngine, PRESETS } = engineModule;
+    import { ImageCoreEngine, PRESETS } from './engine.js';
 
     const els = {
       fileInput: document.getElementById('file-input'),
@@ -274,19 +303,20 @@
       overlayCanvas: document.getElementById('overlay-canvas'),
       processingOverlay: document.getElementById('processing-overlay'),
       processingText: document.getElementById('processing-text'),
-      engineBadge: engineBadgeEl,
+      engineBadge: document.getElementById('engine-badge'),
       imageInfo: document.getElementById('image-info'),
       btnCompare: document.getElementById('btn-compare'),
       btnResetAll: document.getElementById('btn-reset-all'),
       btnDownload: document.getElementById('btn-download'),
       // Swin2SR AI関連UI
       btnSwin2sr: document.getElementById('btn-swin2sr'),
-      swin2srBadge: swinBadgeEl,
-      btnReopenConsent: document.getElementById('btn-reopen-consent'),
+      swin2srBadge: document.getElementById('swin2sr-status-badge'),
+      btnAiPrefReset: document.getElementById('btn-ai-pref-reset'),
       aiProgressWrap: document.getElementById('ai-progress-wrap'),
       aiProgressFill: document.getElementById('ai-progress-fill'),
       aiProgressText: document.getElementById('ai-progress-text'),
       aiConsentModal: document.getElementById('ai-consent-modal'),
+      chkRememberConsent: document.getElementById('chk-remember-consent'),
       btnConsentYes: document.getElementById('btn-consent-yes'),
       btnConsentNo: document.getElementById('btn-consent-no'),
       // 表示ズーム (20%〜300% 10%単位)
@@ -311,208 +341,111 @@
       valBrightness: document.getElementById('val-brightness'),
       valContrast: document.getElementById('val-contrast'),
       valMosaic: document.getElementById('val-mosaic'),
-      // モザイク操作
+      // トリミングUI
+      toggleCropMode: document.getElementById('toggle-crop-mode'),
+      ratioBtns: document.querySelectorAll('.ratio-btn'),
+      cropX: document.getElementById('crop-x'),
+      cropY: document.getElementById('crop-y'),
+      cropW: document.getElementById('crop-w'),
+      cropH: document.getElementById('crop-h'),
+      btnCropApply: document.getElementById('btn-crop-apply'),
+      btnCropReset: document.getElementById('btn-crop-reset'),
+      cropStatusLabel: document.getElementById('crop-status-label'),
+      // モザイクUI
       toggleMosaicMode: document.getElementById('toggle-mosaic-mode'),
       btnMosaicUndo: document.getElementById('btn-mosaic-undo'),
       btnMosaicClear: document.getElementById('btn-mosaic-clear'),
       mosaicCount: document.getElementById('mosaic-count'),
       presetBtns: document.querySelectorAll('.preset-btn'),
-      resetHeaders: document.querySelectorAll('.control-header[data-reset-target]')
+      resetHeaders: document.querySelectorAll('.control-header[data-reset-target]'),
+      toast: document.getElementById('toast')
     };
 
     const engine = new ImageCoreEngine(els.mainCanvas);
     let viewZoom = 100;
-    let isDrawingMosaic = false;
+    let pointerMode = null; // 'mosaic' | 'crop' | null
     let startPt = { x: 0, y: 0 };
-    let currentRect = null;
+    let currentMosaicRect = null;
+    // トリミング枠のドラフト状態（現在のメインキャンバス座標系での x, y, w, h）
+    let draftCrop = { x: 0, y: 0, w: 0, h: 0 };
+    let selectedAspectRatio = null; // null (free) または 数値 (w / h)
     let renderDebounceTimer = null;
-    let pendingAutoInferenceAfterDownload = false;
 
-    // Swin2SRモデル利用可否ステータスのUI同期
+    function showToast(msg, duration = 3200) {
+      els.toast.textContent = msg;
+      els.toast.classList.remove('hidden');
+      clearTimeout(els.toast._timer);
+      els.toast._timer = setTimeout(() => els.toast.classList.add('hidden'), duration);
+    }
+
+    // Swin2SRモデル利用可否ステータスのUI更新
     function updateSwin2SRStatusUI() {
       const state = engine.getSwin2SRState();
+      const hasImg = engine.hasImage();
       els.swin2srBadge.className = 'ai-status-pill';
 
       if (state === 'ready') {
         els.swin2srBadge.textContent = '利用可能 (Swin2SR 準備完了)';
         els.swin2srBadge.classList.add('status-ready');
-        els.btnReopenConsent.classList.add('hidden');
-        els.btnSwin2sr.textContent = engine.isUsingAIUpscaledBase()
-          ? '✅ Swin2SR AI超解像 適用中 (再推論)'
-          : '🧠 AI超解像 (Swin2SR) で推論実行';
+        if (!hasImg) {
+          els.btnSwin2sr.textContent = '✅ Swin2SR 準備完了 (画像を開くと推論できます)';
+        } else {
+          els.btnSwin2sr.textContent = engine.isUsingAIUpscaledBase()
+            ? '✅ Swin2SR AI超解像 適用中 (クリックで再推論)'
+            : '🧠 AI超解像 (Swin2SR) で推論実行';
+        }
       } else if (state === 'loading') {
         els.swin2srBadge.textContent = 'モデル取得・初期化中...';
         els.swin2srBadge.classList.add('status-loading');
-        els.btnReopenConsent.classList.add('hidden');
-        els.btnSwin2sr.textContent = '⏳ Swin2SR モデル準備中...';
+        els.btnSwin2sr.textContent = '⏳ Swin2SR モデルをダウンロード中...';
       } else if (state === 'declined') {
-        els.swin2srBadge.textContent = '利用不可 (DL拒否・高速数式モード)';
+        els.swin2srBadge.textContent = '利用不可 (高速数式モード記憶済)';
         els.swin2srBadge.classList.add('status-declined');
-        els.btnReopenConsent.classList.remove('hidden');
-        els.btnSwin2sr.textContent = '⚡ 高速数式アルゴリズムで超解像を実行';
+        els.btnSwin2sr.textContent = hasImg
+          ? '⚡ 高速数式アルゴリズムで超解像を実行'
+          : '⚡ 高速数式モード待機中 (画像を開いてください)';
       } else if (state === 'unavailable') {
-        els.swin2srBadge.textContent = '利用不可 (通信遮断・高速数式モード)';
+        els.swin2srBadge.textContent = '利用不可 (環境非対応・高速数式モード)';
         els.swin2srBadge.classList.add('status-declined');
-        els.btnReopenConsent.classList.remove('hidden');
         els.btnSwin2sr.textContent = '⚡ 高速数式アルゴリズムで超解像を実行';
       } else {
-        els.swin2srBadge.textContent = '未取得 (利用確認中)';
+        els.swin2srBadge.textContent = '未取得 (ダウンロード確認待ち)';
         els.swin2srBadge.classList.add('status-unloaded');
-        els.btnReopenConsent.classList.remove('hidden');
-        els.btnSwin2sr.textContent = '🧠 AI超解像 (Swin2SR) で推論実行';
+        els.btnSwin2sr.textContent = '🧠 AI超解像 (Swin2SR) を準備 / 推論実行';
       }
     }
 
-    // 起動シーケンス（ブロッキングなし・即時起動＋初回Yes/Noダイアログ表示）
-    async function bootApplication() {
-      // 1. まず即座に基本エンジンをReady状態にし、「エンジン初期化中」で止まる現象を完全に防ぐ
-      els.engineBadge.textContent = '高速数式エンジン稼働中';
-      els.engineBadge.className = 'badge badge-wasm';
-      updateSwin2SRStatusUI();
-
-      // 2. 初回起動時に明示的な Yes / No 確認モーダルを即座に表示する
-      els.aiConsentModal.classList.remove('hidden');
-
-      // 3. バックグラウンドでWebGPU対応有無をタイムアウト付き(1.5秒上限)で安全に検出
-      const hwStatus = await engine.detectHardwareCapabilities();
-      els.engineBadge.textContent = hwStatus.label;
-      els.engineBadge.className = `badge ${hwStatus.isWebGPU ? 'badge-ready' : 'badge-wasm'}`;
-    }
-
-    // Swin2SRモデルのダウンロード処理（進捗表示付き）
-    async function downloadAndPrepareSwin2SR() {
-      els.aiProgressWrap.classList.remove('hidden');
-      els.aiProgressFill.style.width = '5%';
-      els.aiProgressText.textContent = 'AI推論ランタイムを取得中...';
-      updateSwin2SRStatusUI();
-
+    // 初回起動時のエンジン初期化 ＆ 記憶された同意設定(Yes/No)に基づく自動スキップ処理
+    async function initApp() {
       try {
-        await engine.prepareSwin2SRModel((prog) => {
-          if (prog.status === 'runtime') {
-            els.aiProgressFill.style.width = '12%';
-            els.aiProgressText.textContent = 'ONNX Runtime / Transformers.js 接続完了。モデル取得開始...';
-          } else if (prog.status === 'progress' || prog.status === 'download') {
-            if (typeof prog.progress === 'number') {
-              const pct = Math.max(12, Math.min(99, Math.round(prog.progress)));
-              els.aiProgressFill.style.width = `${pct}%`;
-              els.aiProgressText.textContent = `Swin2SR取得中 (${prog.file || 'onnx'})... ${pct}%`;
-            } else if (typeof prog.loaded === 'number') {
-              const mb = (prog.loaded / (1024 * 1024)).toFixed(1);
-              els.aiProgressFill.style.width = '65%';
-              els.aiProgressText.textContent = `Swin2SR取得中... ${mb} MB 完了`;
-            }
-          }
-        });
+        const status = await engine.initializeRuntime();
+        els.engineBadge.textContent = status.label;
+        els.engineBadge.className = `badge ${status.isWebGPU ? 'badge-ready' : 'badge-wasm'}`;
+      } catch (_) {
+        els.engineBadge.textContent = 'WASM High-Precision Ready';
+        els.engineBadge.className = 'badge badge-wasm';
+      }
 
-        els.aiProgressFill.style.width = '100%';
-        els.aiProgressText.textContent = 'Swin2SR 準備完了 (100%)';
-        setTimeout(() => els.aiProgressWrap.classList.add('hidden'), 1200);
-
+      const savedConsent = engine.getSavedConsentPreference(); // 'yes' | 'no' | null
+      if (savedConsent === 'yes' && engine.getSwin2SRState() !== 'unavailable') {
+        // 2回目以降（Yes記憶済み）: 確認モーダルをスキップしてバックグラウンドで自動準備
         updateSwin2SRStatusUI();
-        showToast('Swin2SR AIモデルの準備が完了しました！利用可能です。');
-
-        // 画像を開いた状態でボタンからDL開始していた場合は続けて推論を実行
-        if (pendingAutoInferenceAfterDownload && engine.hasImage()) {
-          pendingAutoInferenceAfterDownload = false;
-          await runSwin2SROnCurrentImage();
-        }
-      } catch (err) {
-        els.aiProgressWrap.classList.add('hidden');
+        downloadAndOptionallyRunSwin2SR(true);
+      } else if (savedConsent === 'no') {
+        // 2回目以降（No記憶済み）: 確認モーダルをスキップして高速数式モードへ
+        engine.declineSwin2SRDownload(false);
         updateSwin2SRStatusUI();
-        showToast(`AIモデルの取得に失敗したため、高速数式モードに切り替えました (${err.message})`, 5000);
-
-        if (pendingAutoInferenceAfterDownload && engine.hasImage()) {
-          pendingAutoInferenceAfterDownload = false;
-          await applyFastMathFallback('AIモデル取得不可のため、高速数式アルゴリズムで超解像を実行しました');
-        }
-      }
-    }
-
-    // 現在の画像に対してSwin2SRディープラーニング推論を実行
-    async function runSwin2SROnCurrentImage() {
-      if (!engine.hasImage()) return;
-      setLoading(true, 'Swin2SR ニューラルネット超解像を実行中 (数秒かかります)...');
-      try {
-        const res = await engine.runSwin2SRInference();
-        els.presetBtns.forEach(b => b.classList.remove('active'));
-        els.btnSwin2sr.classList.add('active');
-
-        // ベース画像がSwin2SRで2倍超解像されたため、後段スライダーを自然な微調整値にセット
-        els.paramSuperres.value = 20;
-        els.paramDetail.value = 25;
-        els.paramSharpness.value = 2;
-        els.paramScale.value = 1.0;
-
-        updateSwin2SRStatusUI();
-        await triggerProcess();
-        showToast(`Swin2SR AI超解像を適用しました (${res.width} × ${res.height} px)`, 4000);
-      } catch (err) {
-        await applyFastMathFallback(`AI推論中に制限に達したため、高速数式アルゴリズムで代替処理しました (${err.message})`);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    // Swin2SR非利用時（No選択時・通信不可時）の高速数式アルゴリズム代替処理
-    async function applyFastMathFallback(reasonMsg) {
-      els.presetBtns.forEach(b => b.classList.remove('active'));
-      els.btnSwin2sr.classList.add('active');
-
-      els.paramSuperres.value = 85;
-      els.paramDetail.value = 50;
-      els.paramSharpness.value = 5;
-      if (Number(els.paramScale.value) === 1.0) {
-        els.paramScale.value = 2.0;
-      }
-      updateSwin2SRStatusUI();
-      showToast(reasonMsg, 3800);
-      await triggerProcess();
-    }
-
-    // ====== Yes / No モーダルのイベント処理 ======
-    els.btnConsentYes.addEventListener('click', () => {
-      els.aiConsentModal.classList.add('hidden');
-      downloadAndPrepareSwin2SR();
-    });
-
-    els.btnConsentNo.addEventListener('click', async () => {
-      els.aiConsentModal.classList.add('hidden');
-      engine.declineSwin2SRDownload();
-      updateSwin2SRStatusUI();
-      showToast('ダウンロードを行わず、高速・軽量な数式アルゴリズムモードに設定しました');
-
-      if (pendingAutoInferenceAfterDownload && engine.hasImage()) {
-        pendingAutoInferenceAfterDownload = false;
-        await applyFastMathFallback('高速・軽量な数式アルゴリズムで超解像処理を実行しました');
-      }
-    });
-
-    // 「設定変更」リンクからいつでもYes/Noモーダルを再表示可能
-    els.btnReopenConsent.addEventListener('click', () => {
-      pendingAutoInferenceAfterDownload = false;
-      els.aiConsentModal.classList.remove('hidden');
-    });
-
-    // プリセット最上部のSwin2SR実行ボタン押下時
-    els.btnSwin2sr.addEventListener('click', async () => {
-      if (!engine.hasImage()) return;
-      const state = engine.getSwin2SRState();
-
-      if (state === 'ready') {
-        await runSwin2SROnCurrentImage();
-      } else if (state === 'loading') {
-        pendingAutoInferenceAfterDownload = true;
-        showToast('現在Swin2SRモデルを取得中です。完了次第自動で推論を適用します。');
-      } else if (state === 'declined' || state === 'unavailable') {
-        // 拒否・利用不可時は現在の高速・軽量な数式アルゴリズムで即座に高解像度化を実行
-        await applyFastMathFallback('高速・軽量な数式アルゴリズムで高解像度・高精細化を実行しました');
       } else {
-        pendingAutoInferenceAfterDownload = true;
-        els.aiConsentModal.classList.remove('hidden');
+        // 初回アクセス時: 確認モーダルを表示
+        updateSwin2SRStatusUI();
+        if (engine.getSwin2SRState() === 'unloaded') {
+          els.aiConsentModal.classList.remove('hidden');
+        }
       }
-    });
+    }
+    initApp();
 
-    // ====== 画像読み込み＆基本UI制御 ======
+    // ファイル読み込み処理
     async function handleFile(file) {
       if (!file) return;
       setLoading(true, '画像を安全に検証・展開中...');
@@ -524,6 +457,7 @@
         resetParametersUI();
         updateSwin2SRStatusUI();
         await triggerProcess();
+        initDraftCropToFullCanvas();
         showToast(`画像を読み込みました (${meta.width} × ${meta.height} px)`);
       } catch (err) {
         showToast(`エラー: ${err.message}`, 4500);
@@ -535,14 +469,18 @@
 
     function enableControls(enabled) {
       const inputs = [
-        els.btnCompare, els.btnResetAll, els.btnDownload, els.btnSwin2sr,
+        els.btnCompare, els.btnResetAll, els.btnDownload,
         els.paramSuperres, els.paramDetail, els.paramSharpness,
         els.paramScale, els.paramBrightness, els.paramContrast,
-        els.paramMosaic, els.toggleMosaicMode
+        els.paramMosaic, els.toggleMosaicMode,
+        els.toggleCropMode, els.cropX, els.cropY, els.cropW, els.cropH,
+        els.btnCropApply
       ];
       inputs.forEach(el => { el.disabled = !enabled; });
       els.presetBtns.forEach(btn => { btn.disabled = !enabled; });
+      els.ratioBtns.forEach(btn => { btn.disabled = !enabled; });
       updateMosaicButtonsUI();
+      updateCropButtonsUI();
     }
 
     function updateMosaicButtonsUI() {
@@ -550,6 +488,17 @@
       els.mosaicCount.textContent = `選択: ${count}箇所`;
       els.btnMosaicUndo.disabled = count === 0;
       els.btnMosaicClear.disabled = count === 0;
+    }
+
+    function updateCropButtonsUI() {
+      const cropped = engine.isCropped();
+      els.btnCropReset.disabled = !cropped;
+      if (cropped) {
+        const dims = engine.getBaseDimensions();
+        els.cropStatusLabel.textContent = `適用中 (${dims.width}×${dims.height})`;
+      } else {
+        els.cropStatusLabel.textContent = '未適用 (全体)';
+      }
     }
 
     function resetParametersUI() {
@@ -562,27 +511,25 @@
       els.paramMosaic.value = 15;
       els.presetBtns.forEach(b => b.classList.remove('active'));
       els.btnSwin2sr.classList.remove('active');
+      els.toggleCropMode.checked = false;
+      els.toggleMosaicMode.checked = false;
+      updateOverlayCursor();
       updateParamLabels();
       updateMosaicButtonsUI();
+      updateCropButtonsUI();
     }
 
     function updateParamLabels() {
       const sr = Number(els.paramSuperres.value);
       els.valSuperres.textContent = sr === 0 ? 'OFF (0)' : `Lv.${sr}`;
-
       els.valDetail.textContent = els.paramDetail.value;
-
       const sh = Number(els.paramSharpness.value);
       els.valSharpness.textContent = sh === 0 ? 'OFF' : `Lv.${sh} / 10`;
-
       els.valScale.textContent = `${Number(els.paramScale.value).toFixed(1)}x`;
-
       const br = Number(els.paramBrightness.value);
       els.valBrightness.textContent = br > 0 ? `+${br}` : `${br}`;
-
       const ct = Number(els.paramContrast.value);
       els.valContrast.textContent = ct > 0 ? `+${ct}` : `${ct}`;
-
       els.valMosaic.textContent = `${els.paramMosaic.value}px`;
     }
 
@@ -620,9 +567,11 @@
         const resultInfo = await engine.process(params);
         if (resultInfo) {
           syncOverlaySize();
+          clampDraftCropToCanvas();
           applyViewZoom();
-          const modeLabel = engine.isUsingAIUpscaledBase() ? '[Swin2SR適用済]' : '[数式エンジン]';
-          els.imageInfo.textContent = `${modeLabel} 出力: ${resultInfo.width} × ${resultInfo.height} px (${params.scale.toFixed(1)}x)`;
+          const modeLabel = engine.isUsingAIUpscaledBase() ? '[Swin2SR AI]' : '[数式エンジン]';
+          const cropTag = engine.isCropped() ? ' [トリミング済]' : '';
+          els.imageInfo.textContent = `${modeLabel}${cropTag} 出力: ${resultInfo.width} × ${resultInfo.height} px (${params.scale.toFixed(1)}x)`;
         }
       } catch (err) {
         showToast(`処理エラー: ${err.message}`);
@@ -631,7 +580,295 @@
       }
     }
 
-    // 表示ズーム（20%〜300% 10%単位）
+    // ====== トリミング（切り抜き）座標・比率管理 ======
+
+    function initDraftCropToFullCanvas() {
+      if (!engine.hasImage()) return;
+      const w = els.mainCanvas.width;
+      const h = els.mainCanvas.height;
+      draftCrop = { x: 0, y: 0, w, h };
+      if (selectedAspectRatio) {
+        fitDraftCropToAspectRatio(selectedAspectRatio);
+      } else {
+        syncCropInputsFromDraft();
+      }
+      drawOverlay();
+    }
+
+    function clampDraftCropToCanvas() {
+      if (!engine.hasImage()) return;
+      const maxW = els.mainCanvas.width;
+      const maxH = els.mainCanvas.height;
+      if (draftCrop.w <= 0 || draftCrop.h <= 0) {
+        draftCrop = { x: 0, y: 0, w: maxW, h: maxH };
+      } else {
+        draftCrop.x = Math.max(0, Math.min(maxW - 4, Math.round(draftCrop.x)));
+        draftCrop.y = Math.max(0, Math.min(maxH - 4, Math.round(draftCrop.y)));
+        draftCrop.w = Math.max(4, Math.min(maxW - draftCrop.x, Math.round(draftCrop.w)));
+        draftCrop.h = Math.max(4, Math.min(maxH - draftCrop.y, Math.round(draftCrop.h)));
+      }
+      syncCropInputsFromDraft();
+    }
+
+    function syncCropInputsFromDraft() {
+      els.cropX.value = Math.round(draftCrop.x);
+      els.cropY.value = Math.round(draftCrop.y);
+      els.cropW.value = Math.round(draftCrop.w);
+      els.cropH.value = Math.round(draftCrop.h);
+    }
+
+    // 指定したアスペクト比でキャンバス中央に最大トリミング枠を計算
+    function fitDraftCropToAspectRatio(ratio) {
+      if (!engine.hasImage()) return;
+      const cw = els.mainCanvas.width;
+      const ch = els.mainCanvas.height;
+      if (!ratio) {
+        draftCrop = { x: 0, y: 0, w: cw, h: ch };
+      } else {
+        let w = cw;
+        let h = Math.round(w / ratio);
+        if (h > ch) {
+          h = ch;
+          w = Math.round(h * ratio);
+        }
+        const x = Math.round((cw - w) / 2);
+        const y = Math.round((ch - h) / 2);
+        draftCrop = { x, y, w: Math.max(4, w), h: Math.max(4, h) };
+      }
+      syncCropInputsFromDraft();
+      drawOverlay();
+    }
+
+    // 数値入力欄 (X, Y, W, H) が変更されたときのハンドラ
+    function handleCropNumericInput(changedField) {
+      if (!engine.hasImage()) return;
+      const cw = els.mainCanvas.width;
+      const ch = els.mainCanvas.height;
+
+      let x = Math.max(0, Math.min(cw - 4, Math.round(Number(els.cropX.value) || 0)));
+      let y = Math.max(0, Math.min(ch - 4, Math.round(Number(els.cropY.value) || 0)));
+      let w = Math.max(4, Math.min(cw - x, Math.round(Number(els.cropW.value) || 4)));
+      let h = Math.max(4, Math.min(ch - y, Math.round(Number(els.cropH.value) || 4)));
+
+      // 比率プリセットが選択されている場合はWとHを連動
+      if (selectedAspectRatio) {
+        if (changedField === 'h') {
+          w = Math.round(h * selectedAspectRatio);
+          if (x + w > cw) {
+            w = cw - x;
+            h = Math.max(4, Math.round(w / selectedAspectRatio));
+          }
+        } else if (changedField === 'w') {
+          h = Math.round(w / selectedAspectRatio);
+          if (y + h > ch) {
+            h = ch - y;
+            w = Math.max(4, Math.round(h * selectedAspectRatio));
+          }
+        }
+      }
+
+      draftCrop = { x, y, w, h };
+      syncCropInputsFromDraft();
+      // 数値入力を触ったら自動的にトリミング枠プレビューを表示
+      if (!els.toggleCropMode.checked) {
+        els.toggleCropMode.checked = true;
+        els.toggleMosaicMode.checked = false;
+        updateOverlayCursor();
+      }
+      drawOverlay();
+    }
+
+    els.cropX.addEventListener('input', () => handleCropNumericInput('x'));
+    els.cropY.addEventListener('input', () => handleCropNumericInput('y'));
+    els.cropW.addEventListener('input', () => handleCropNumericInput('w'));
+    els.cropH.addEventListener('input', () => handleCropNumericInput('h'));
+
+    // 比率プリセットボタンのクリック
+    els.ratioBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!engine.hasImage()) return;
+        els.ratioBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        const ratioStr = btn.dataset.ratio;
+        if (ratioStr === 'free') {
+          selectedAspectRatio = null;
+        } else {
+          const [rw, rh] = ratioStr.split(':').map(Number);
+          selectedAspectRatio = rw / rh;
+        }
+
+        // トリミングモードを自動的にONにして枠を表示
+        els.toggleCropMode.checked = true;
+        els.toggleMosaicMode.checked = false;
+        updateOverlayCursor();
+        fitDraftCropToAspectRatio(selectedAspectRatio);
+      });
+    });
+
+    // 「✂️ トリミングを適用」ボタン
+    els.btnCropApply.addEventListener('click', async () => {
+      if (!engine.hasImage()) return;
+      const cw = els.mainCanvas.width;
+      const ch = els.mainCanvas.height;
+      if (draftCrop.w < 4 || draftCrop.h < 4) {
+        showToast('トリミング範囲が小さすぎます');
+        return;
+      }
+
+      // 現在のメインキャンバスに対する正規化座標 (0.0 ~ 1.0) でエンジンに適用
+      engine.applyCropNormalized({
+        x: draftCrop.x / cw,
+        y: draftCrop.y / ch,
+        w: draftCrop.w / cw,
+        h: draftCrop.h / ch
+      });
+
+      els.toggleCropMode.checked = false;
+      updateOverlayCursor();
+      updateCropButtonsUI();
+      updateMosaicButtonsUI();
+      await triggerProcess();
+      initDraftCropToFullCanvas();
+      showToast('トリミングを適用しました');
+    });
+
+    // 「元に戻す(解除)」ボタン
+    els.btnCropReset.addEventListener('click', async () => {
+      if (!engine.hasImage() || !engine.isCropped()) return;
+      engine.resetCrop();
+      updateCropButtonsUI();
+      await triggerProcess();
+      initDraftCropToFullCanvas();
+      showToast('トリミングを解除し、元の画像領域に戻しました');
+    });
+
+    // ====== Swin2SR ディープラーニングモデルのダウンロード・推論・フォールバック制御 ======
+
+    async function applyFastMathFallback(reasonMsg) {
+      updateSwin2SRStatusUI();
+      showToast(reasonMsg, 4000);
+      if (!engine.hasImage()) return;
+
+      els.presetBtns.forEach(b => b.classList.remove('active'));
+      els.btnSwin2sr.classList.add('active');
+
+      els.paramSuperres.value = 85;
+      els.paramDetail.value = 50;
+      els.paramSharpness.value = 5;
+      if (Number(els.paramScale.value) === 1.0) {
+        els.paramScale.value = 2.0;
+      }
+      await triggerProcess();
+    }
+
+    async function downloadAndOptionallyRunSwin2SR(silentToastOnReady = false) {
+      if (engine.getSwin2SRState() === 'loading') return;
+
+      els.aiProgressWrap.classList.remove('hidden');
+      els.aiProgressFill.style.width = '0%';
+      els.aiProgressText.textContent = 'Swin2SRモデルを接続・準備中...';
+      els.btnSwin2sr.disabled = true;
+      updateSwin2SRStatusUI();
+
+      const progressCallback = (progressObj) => {
+        if (progressObj.status === 'progress' && typeof progressObj.progress === 'number') {
+          const pct = Math.round(progressObj.progress);
+          els.aiProgressFill.style.width = `${pct}%`;
+          els.aiProgressText.textContent = `モデル準備中 (${progressObj.file || 'onnx'})... ${pct}%`;
+        } else if (progressObj.status === 'inference') {
+          els.aiProgressFill.style.width = '100%';
+          els.aiProgressText.textContent = 'Swin2SR ニューラルネット推論を実行中...';
+          els.processingText.textContent = 'Swin2SR AI超解像推論中 (数秒かかります)...';
+        }
+      };
+
+      try {
+        if (engine.getSwin2SRState() !== 'ready') {
+          await engine.downloadSwin2SRModel(progressCallback);
+        }
+
+        if (engine.hasImage()) {
+          setLoading(true, 'ディープラーニング超解像 (Swin2SR) を実行中...');
+          const res = await engine.runSwin2SRSuperResolution(progressCallback);
+
+          els.btnSwin2sr.classList.add('active');
+          els.paramSuperres.value = 25;
+          els.paramDetail.value = 25;
+          els.paramSharpness.value = 2;
+          els.paramScale.value = 1.0;
+
+          updateCropButtonsUI();
+          await triggerProcess();
+          initDraftCropToFullCanvas();
+          showToast(`Swin2SR AI超解像が完了しました (${res.width} × ${res.height} px)`, 4000);
+        } else if (!silentToastOnReady) {
+          showToast('Swin2SR AIモデルの準備が完了しました！画像を開くと推論できます。', 3500);
+        }
+      } catch (err) {
+        await applyFastMathFallback(`Swin2SRモデルを利用できないため、高速数式アルゴリズムへ切り替えました (${err.message})`);
+      } finally {
+        els.aiProgressWrap.classList.add('hidden');
+        els.btnSwin2sr.disabled = false;
+        setLoading(false);
+        updateSwin2SRStatusUI();
+      }
+    }
+
+    // プリセット最上部のSwin2SRボタン押下時
+    els.btnSwin2sr.addEventListener('click', async () => {
+      const state = engine.getSwin2SRState();
+
+      if (state === 'ready') {
+        if (!engine.hasImage()) {
+          showToast('先に「📂 画像を開く」から画像を選択してください');
+          return;
+        }
+        await downloadAndOptionallyRunSwin2SR(false);
+      } else if (state === 'declined') {
+        // No（高速数式モード）が記憶されている場合は、確認画面を出さずに即座に数式アルゴリズムで超解像処理
+        if (!engine.hasImage()) {
+          showToast('現在「高速数式モード」に設定されています。AIモデルを使う場合は右上の「⚙設定変更」を押してください。');
+          return;
+        }
+        await applyFastMathFallback('高速・軽量な数式アルゴリズムで高解像度・高精細化を実行しました');
+      } else if (state === 'unavailable') {
+        if (!engine.hasImage()) {
+          showToast('AIランタイム非対応環境です。画像を開くと高速数式アルゴリズムで処理します。');
+          return;
+        }
+        await applyFastMathFallback('AIランタイム非対応環境のため、高速数式アルゴリズムで超解像処理を実行しました');
+      } else {
+        els.aiConsentModal.classList.remove('hidden');
+      }
+    });
+
+    // 「⚙設定変更」ボタン：記憶した設定をリセットしてYes/Noモーダルを再表示
+    els.btnAiPrefReset.addEventListener('click', () => {
+      els.chkRememberConsent.checked = true;
+      els.aiConsentModal.classList.remove('hidden');
+    });
+
+    // モーダルで「Yes」を選択
+    els.btnConsentYes.addEventListener('click', async () => {
+      els.aiConsentModal.classList.add('hidden');
+      if (els.chkRememberConsent.checked) {
+        engine.saveConsentPreference('yes');
+      } else {
+        engine.clearConsentPreference();
+      }
+      await downloadAndOptionallyRunSwin2SR(false);
+    });
+
+    // モーダルで「No」を選択
+    els.btnConsentNo.addEventListener('click', async () => {
+      els.aiConsentModal.classList.add('hidden');
+      const remember = els.chkRememberConsent.checked;
+      engine.declineSwin2SRDownload(remember);
+      await applyFastMathFallback('Swin2SRのダウンロードをスキップしました。高速・軽量な数式アルゴリズムで画像処理を行います。');
+    });
+
+    // 表示ズーム（20%〜300% 10%単位）の適用
     function applyViewZoom(newZoom) {
       if (typeof newZoom === 'number') {
         viewZoom = Math.min(300, Math.max(20, Math.round(newZoom / 10) * 10));
@@ -659,35 +896,81 @@
       }
     }
 
+    function updateOverlayCursor() {
+      const isOverlayActive = els.toggleCropMode.checked || els.toggleMosaicMode.checked;
+      els.overlayCanvas.style.cursor = isOverlayActive ? 'crosshair' : 'default';
+    }
+
+    // トリミング枠 ＆ モザイク選択枠のオーバーレイ描画
     function drawOverlay() {
       const ctx = els.overlayCanvas.getContext('2d');
       const w = els.overlayCanvas.width;
       const h = els.overlayCanvas.height;
       ctx.clearRect(0, 0, w, h);
 
-      if (!els.toggleMosaicMode.checked && !currentRect) return;
-
-      const regions = engine.getMosaicRegions();
-      ctx.save();
+      if (!engine.hasImage()) return;
       const lineScale = Math.max(1.5, 2 / (viewZoom / 100));
-      ctx.lineWidth = lineScale;
-      ctx.strokeStyle = 'rgba(37, 99, 235, 0.9)';
-      ctx.fillStyle = 'rgba(37, 99, 235, 0.12)';
-      ctx.setLineDash([6, 4]);
 
-      regions.forEach(r => {
-        ctx.fillRect(r.x * w, r.y * h, r.w * w, r.h * h);
-        ctx.strokeRect(r.x * w, r.y * h, r.w * w, r.h * h);
-      });
+      // 1. トリミング範囲指定モードの描画（周囲の暗転マスク＋三分割グリッド線）
+      if (els.toggleCropMode.checked && draftCrop.w > 0 && draftCrop.h > 0) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+        // 外側4矩形を暗く塗る
+        ctx.fillRect(0, 0, w, draftCrop.y);
+        ctx.fillRect(0, draftCrop.y + draftCrop.h, w, h - (draftCrop.y + draftCrop.h));
+        ctx.fillRect(0, draftCrop.y, draftCrop.x, draftCrop.h);
+        ctx.fillRect(draftCrop.x + draftCrop.w, draftCrop.y, w - (draftCrop.x + draftCrop.w), draftCrop.h);
 
-      if (currentRect) {
-        ctx.strokeStyle = '#dc2626';
-        ctx.fillStyle = 'rgba(220, 38, 38, 0.18)';
+        // 外枠（白＋青の二重視認枠）
+        ctx.lineWidth = lineScale;
+        ctx.strokeStyle = '#ffffff';
+        ctx.strokeRect(draftCrop.x, draftCrop.y, draftCrop.w, draftCrop.h);
+        ctx.strokeStyle = '#2563eb';
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(draftCrop.x, draftCrop.y, draftCrop.w, draftCrop.h);
+
+        // 三分割法（Rule of Thirds）ガイドライン
         ctx.setLineDash([]);
-        ctx.fillRect(currentRect.x, currentRect.y, currentRect.w, currentRect.h);
-        ctx.strokeRect(currentRect.x, currentRect.y, currentRect.w, currentRect.h);
+        ctx.lineWidth = Math.max(1, lineScale * 0.6);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+        ctx.beginPath();
+        const thirdW = draftCrop.w / 3;
+        const thirdH = draftCrop.h / 3;
+        ctx.moveTo(draftCrop.x + thirdW, draftCrop.y);
+        ctx.lineTo(draftCrop.x + thirdW, draftCrop.y + draftCrop.h);
+        ctx.moveTo(draftCrop.x + thirdW * 2, draftCrop.y);
+        ctx.lineTo(draftCrop.x + thirdW * 2, draftCrop.y + draftCrop.h);
+        ctx.moveTo(draftCrop.x, draftCrop.y + thirdH);
+        ctx.lineTo(draftCrop.x + draftCrop.w, draftCrop.y + thirdH);
+        ctx.moveTo(draftCrop.x, draftCrop.y + thirdH * 2);
+        ctx.lineTo(draftCrop.x + draftCrop.w, draftCrop.y + thirdH * 2);
+        ctx.stroke();
+        ctx.restore();
       }
-      ctx.restore();
+
+      // 2. モザイク選択モードの描画
+      if (els.toggleMosaicMode.checked || currentMosaicRect) {
+        const regions = engine.getMosaicRegions();
+        ctx.save();
+        ctx.lineWidth = lineScale;
+        ctx.strokeStyle = 'rgba(37, 99, 235, 0.9)';
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.12)';
+        ctx.setLineDash([6, 4]);
+
+        regions.forEach(r => {
+          ctx.fillRect(r.x * w, r.y * h, r.w * w, r.h * h);
+          ctx.strokeRect(r.x * w, r.y * h, r.w * w, r.h * h);
+        });
+
+        if (currentMosaicRect) {
+          ctx.strokeStyle = '#dc2626';
+          ctx.fillStyle = 'rgba(220, 38, 38, 0.18)';
+          ctx.setLineDash([]);
+          ctx.fillRect(currentMosaicRect.x, currentMosaicRect.y, currentMosaicRect.w, currentMosaicRect.h);
+          ctx.strokeRect(currentMosaicRect.x, currentMosaicRect.y, currentMosaicRect.w, currentMosaicRect.h);
+        }
+        ctx.restore();
+      }
     }
 
     function setLoading(isLoading, text = '処理中...') {
@@ -695,7 +978,8 @@
       els.processingOverlay.classList.toggle('hidden', !isLoading);
     }
 
-    // ====== 各種UIイベント登録 ======
+    // ====== イベントリスナー登録 ======
+
     els.fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
     els.dropZone.addEventListener('dragover', e => {
       e.preventDefault();
@@ -722,9 +1006,11 @@
 
     els.resetHeaders.forEach(header => {
       header.addEventListener('dblclick', () => {
-        const inputEl = document.getElementById(header.dataset.resetTarget);
+        const targetId = header.dataset.resetTarget;
+        const defaultVal = header.dataset.default;
+        const inputEl = document.getElementById(targetId);
         if (inputEl && !inputEl.disabled) {
-          inputEl.value = header.dataset.default;
+          inputEl.value = defaultVal;
           els.presetBtns.forEach(b => b.classList.remove('active'));
           scheduleProcess(true);
         }
@@ -733,7 +1019,8 @@
 
     els.presetBtns.forEach(btn => {
       btn.addEventListener('click', () => {
-        const preset = PRESETS[btn.dataset.preset];
+        const key = btn.dataset.preset;
+        const preset = PRESETS[key];
         if (!preset || !engine.hasImage()) return;
 
         els.presetBtns.forEach(b => b.classList.remove('active'));
@@ -771,11 +1058,26 @@
     els.btnZoomOut.addEventListener('click', () => applyViewZoom(viewZoom - 10));
     els.btnZoomFit.addEventListener('click', () => applyViewZoom(100));
 
-    els.toggleMosaicMode.addEventListener('change', () => {
-      const active = els.toggleMosaicMode.checked;
-      els.overlayCanvas.style.cursor = active ? 'crosshair' : 'default';
+    // トリミングモードとモザイク選択モードの排他トグル制御
+    els.toggleCropMode.addEventListener('change', () => {
+      if (els.toggleCropMode.checked) {
+        els.toggleMosaicMode.checked = false;
+        if (draftCrop.w < 4 || draftCrop.h < 4) {
+          initDraftCropToFullCanvas();
+        }
+        showToast('画像上をドラッグするか、XYWH数値・比率ボタンでトリミング範囲を指定してください');
+      }
+      updateOverlayCursor();
       drawOverlay();
-      if (active) showToast('画像上をドラッグしてモザイク範囲を指定してください');
+    });
+
+    els.toggleMosaicMode.addEventListener('change', () => {
+      if (els.toggleMosaicMode.checked) {
+        els.toggleCropMode.checked = false;
+        showToast('画像上をドラッグしてモザイク範囲を指定してください');
+      }
+      updateOverlayCursor();
+      drawOverlay();
     });
 
     function getCanvasCoordinates(e) {
@@ -789,53 +1091,98 @@
       };
     }
 
+    // キャンバス上のドラッグ操作（トリミング範囲指定 ＆ モザイク範囲指定 共通）
     els.overlayCanvas.addEventListener('pointerdown', e => {
-      if (!els.toggleMosaicMode.checked || !engine.hasImage()) return;
+      if (!engine.hasImage()) return;
+      if (!els.toggleCropMode.checked && !els.toggleMosaicMode.checked) return;
+
       e.preventDefault();
       els.overlayCanvas.setPointerCapture(e.pointerId);
-      isDrawingMosaic = true;
       startPt = getCanvasCoordinates(e);
-      currentRect = { x: startPt.x, y: startPt.y, w: 0, h: 0 };
+
+      if (els.toggleCropMode.checked) {
+        pointerMode = 'crop';
+        draftCrop = { x: Math.round(startPt.x), y: Math.round(startPt.y), w: 0, h: 0 };
+      } else if (els.toggleMosaicMode.checked) {
+        pointerMode = 'mosaic';
+        currentMosaicRect = { x: startPt.x, y: startPt.y, w: 0, h: 0 };
+      }
       drawOverlay();
     });
 
     els.overlayCanvas.addEventListener('pointermove', e => {
-      if (!isDrawingMosaic) return;
+      if (!pointerMode) return;
       e.preventDefault();
       const pt = getCanvasCoordinates(e);
-      currentRect = {
-        x: Math.min(startPt.x, pt.x),
-        y: Math.min(startPt.y, pt.y),
-        w: Math.abs(pt.x - startPt.x),
-        h: Math.abs(pt.y - startPt.y)
-      };
-      drawOverlay();
+      const cw = els.overlayCanvas.width;
+      const ch = els.overlayCanvas.height;
+
+      if (pointerMode === 'crop') {
+        let w = Math.abs(pt.x - startPt.x);
+        let h = Math.abs(pt.y - startPt.y);
+
+        // 比率プリセット固定時のアスペクト比維持計算
+        if (selectedAspectRatio) {
+          h = w / selectedAspectRatio;
+          const maxPossibleH = pt.y >= startPt.y ? (ch - startPt.y) : startPt.y;
+          if (h > maxPossibleH) {
+            h = maxPossibleH;
+            w = h * selectedAspectRatio;
+          }
+        }
+
+        const x = pt.x >= startPt.x ? startPt.x : Math.max(0, startPt.x - w);
+        const y = pt.y >= startPt.y ? startPt.y : Math.max(0, startPt.y - h);
+
+        draftCrop = {
+          x: Math.round(x),
+          y: Math.round(y),
+          w: Math.max(4, Math.round(w)),
+          h: Math.max(4, Math.round(h))
+        };
+        syncCropInputsFromDraft();
+        drawOverlay();
+      } else if (pointerMode === 'mosaic') {
+        currentMosaicRect = {
+          x: Math.min(startPt.x, pt.x),
+          y: Math.min(startPt.y, pt.y),
+          w: Math.abs(pt.x - startPt.x),
+          h: Math.abs(pt.y - startPt.y)
+        };
+        drawOverlay();
+      }
     });
 
-    function finishMosaicSelection(e) {
-      if (!isDrawingMosaic) return;
-      isDrawingMosaic = false;
+    function finishPointerSelection(e) {
+      if (!pointerMode) return;
       if (els.overlayCanvas.hasPointerCapture(e.pointerId)) {
         els.overlayCanvas.releasePointerCapture(e.pointerId);
       }
-      if (currentRect && currentRect.w > 4 && currentRect.h > 4) {
-        const w = els.overlayCanvas.width;
-        const h = els.overlayCanvas.height;
-        engine.addMosaicRegion({
-          x: currentRect.x / w,
-          y: currentRect.y / h,
-          w: currentRect.w / w,
-          h: currentRect.h / h
-        });
-        updateMosaicButtonsUI();
-        scheduleProcess(true);
+
+      if (pointerMode === 'crop') {
+        clampDraftCropToCanvas();
+      } else if (pointerMode === 'mosaic') {
+        if (currentMosaicRect && currentMosaicRect.w > 4 && currentMosaicRect.h > 4) {
+          const w = els.overlayCanvas.width;
+          const h = els.overlayCanvas.height;
+          engine.addMosaicRegion({
+            x: currentMosaicRect.x / w,
+            y: currentMosaicRect.y / h,
+            w: currentMosaicRect.w / w,
+            h: currentMosaicRect.h / h
+          });
+          updateMosaicButtonsUI();
+          scheduleProcess(true);
+        }
+        currentMosaicRect = null;
       }
-      currentRect = null;
+
+      pointerMode = null;
       drawOverlay();
     }
 
-    els.overlayCanvas.addEventListener('pointerup', finishMosaicSelection);
-    els.overlayCanvas.addEventListener('pointercancel', finishMosaicSelection);
+    els.overlayCanvas.addEventListener('pointerup', finishPointerSelection);
+    els.overlayCanvas.addEventListener('pointercancel', finishPointerSelection);
 
     els.btnMosaicUndo.addEventListener('click', () => {
       engine.undoMosaicRegion();
@@ -849,14 +1196,15 @@
       scheduleProcess(true);
     });
 
-    els.btnResetAll.addEventListener('click', () => {
+    els.btnResetAll.addEventListener('click', async () => {
       engine.resetToOriginalSource();
       engine.clearMosaicRegions();
       resetParametersUI();
       updateSwin2SRStatusUI();
       applyViewZoom(100);
-      scheduleProcess(true);
-      showToast('すべての設定とAI適用状態を初期画像に戻しました');
+      await triggerProcess();
+      initDraftCropToFullCanvas();
+      showToast('トリミング・モザイク・AI適用を含むすべての設定を初期画像に戻しました');
     });
 
     els.btnDownload.addEventListener('click', async () => {
@@ -875,9 +1223,6 @@
         showToast('保存に失敗しました');
       }
     });
-
-    // アプリケーション起動実行
-    bootApplication();
   </script>
 </body>
 </html>

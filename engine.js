@@ -1,9 +1,10 @@
 /**
  * engine.js
- * 画像処理コアエンジン（Swin2SR ディープラーニング推論 + 高精度数式ピクセルパイプライン）
- * タイムアウト保護・オンデマンドAIロード・メモリ再利用・フォールバック機構搭載
+ * 画像処理コアエンジン（Swin2SR 推論 + トリミング + 高精度数式ピクセルパイプライン）
+ * 初回同意設定の永続化記憶 (localStorage) ＆ 非破壊トリミング・メモリ再利用設計
  */
 
+// 8種類の厳選ワンタッチ・プリセット定義
 export const PRESETS = Object.freeze({
   ai_hd: {
     name: '① くっきり高精細',
@@ -79,19 +80,11 @@ export const PRESETS = Object.freeze({
   }
 });
 
-const MAX_FILE_SIZE_BYTES = 35 * 1024 * 1024;
-const MAX_OUTPUT_DIMENSION = 4096;
-const MAX_SWIN2SR_INPUT_EDGE = 512;
+const MAX_FILE_SIZE_BYTES = 35 * 1024 * 1024; // 35MB上限
+const MAX_OUTPUT_DIMENSION = 4096; // 最大4096px
+const MAX_SWIN2SR_INPUT_EDGE = 640; // Swin2SR推論時のメモリ保護上限
 const SWIN2SR_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
-
-// 永久待機（ハングアップ）を防ぐ汎用タイムアウトラッパー
-function withTimeout(promise, ms, timeoutMessage = 'Timeout') {
-  let timerId;
-  const timeoutPromise = new Promise((_, reject) => {
-    timerId = setTimeout(() => reject(new Error(timeoutMessage)), ms);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timerId));
-}
+const CONSENT_STORAGE_KEY = 'proimage_studio_swin2sr_consent_v1';
 
 export class ImageCoreEngine {
   /**
@@ -104,15 +97,19 @@ export class ImageCoreEngine {
     this.canvas = targetCanvas;
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
 
+    // 1. 読み込んだ直後の純粋な元画像（全リセット・トリミング解除のマスター）
     this.rawSourceCanvas = document.createElement('canvas');
     this.rawSourceCtx = this.rawSourceCanvas.getContext('2d', { willReadFrequently: true });
 
+    // 2. パイプラインの起点となるアクティブベース画像（トリミングやSwin2SRが適用された状態）
     this.sourceCanvas = document.createElement('canvas');
     this.sourceCtx = this.sourceCanvas.getContext('2d', { willReadFrequently: true });
 
+    // 3. ワーク用オフスクリーンバッファ
     this.workCanvas = document.createElement('canvas');
     this.workCtx = this.workCanvas.getContext('2d', { willReadFrequently: true });
 
+    // 4. 超解像・段階補間用の一時キャンバス
     this.stepCanvas = document.createElement('canvas');
     this.stepCtx = this.stepCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -123,6 +120,7 @@ export class ImageCoreEngine {
     this.originalHeight = 0;
     this.imageLoaded = false;
     this.usingAIUpscaledBase = false;
+    this.croppedState = false;
 
     this.mosaicRegions = [];
 
@@ -130,36 +128,97 @@ export class ImageCoreEngine {
     this._pendingParams = null;
 
     this._transformersModule = null;
-    this._isV3Runtime = false;
     this._swin2srPipeline = null;
-    this._modelLoadPromise = null;
     // 'unloaded' | 'loading' | 'ready' | 'declined' | 'unavailable'
     this._swin2srState = 'unloaded';
 
     this.runtimeInfo = {
       isWebGPU: false,
-      label: 'WASM High-Precision Ready'
+      ortLoaded: false,
+      label: '初期化中...'
     };
   }
 
+  // ====== 初回ダウンロード確認 (Yes/No) の記憶機能 (localStorage 安全ラッパー) ======
+
   /**
-   * ハードウェア性能（WebGPU対応有無）のみを1.5秒タイムアウト付きで安全に検出
-   * ※外部ネットワーク通信を一切行わないため、起動時にハングアップしません
+   * 記憶されている同意設定を取得 ('yes' | 'no' | null)
    */
-  async detectHardwareCapabilities() {
+  getSavedConsentPreference() {
+    try {
+      const val = window.localStorage.getItem(CONSENT_STORAGE_KEY);
+      if (val === 'yes' || val === 'no') return val;
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * 同意設定を記憶 ('yes' | 'no')
+   */
+  saveConsentPreference(pref) {
+    try {
+      if (pref === 'yes' || pref === 'no') {
+        window.localStorage.setItem(CONSENT_STORAGE_KEY, pref);
+      }
+    } catch (_) {
+      // プライベートブラウジング等でlocalStorageが無効な場合は無視してメモリ動作を継続
+    }
+  }
+
+  /**
+   * 記憶した同意設定を消去
+   */
+  clearConsentPreference() {
+    try {
+      window.localStorage.removeItem(CONSENT_STORAGE_KEY);
+    } catch (_) {}
+  }
+
+  /**
+   * 初回起動時にWebGPU / WASM環境を検出し、タイムアウト保護付きでAIランタイムを準備する
+   */
+  async initializeRuntime() {
+    const hasWebGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
     let adapterAvailable = false;
-    if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
+
+    if (hasWebGPU) {
       try {
-        const adapter = await withTimeout(navigator.gpu.requestAdapter(), 1500, 'WebGPU timeout');
+        const adapter = await Promise.race([
+          navigator.gpu.requestAdapter(),
+          new Promise(resolve => setTimeout(() => resolve(null), 2000))
+        ]);
         adapterAvailable = Boolean(adapter);
       } catch (_) {
         adapterAvailable = false;
       }
     }
 
+    try {
+      const cdnUrl = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+      const mod = await Promise.race([
+        import(cdnUrl),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('CDN Timeout')), 6000))
+      ]);
+      if (mod && mod.env) {
+        mod.env.allowLocalModels = false;
+        if (mod.env.backends && mod.env.backends.onnx && mod.env.backends.onnx.wasm) {
+          mod.env.backends.onnx.wasm.numThreads = 1;
+        }
+        this._transformersModule = mod;
+        this.runtimeInfo.ortLoaded = true;
+      } else {
+        this._swin2srState = 'unavailable';
+      }
+    } catch (_) {
+      this.runtimeInfo.ortLoaded = false;
+      this._swin2srState = 'unavailable';
+    }
+
     this.runtimeInfo.isWebGPU = adapterAvailable;
     this.runtimeInfo.label = adapterAvailable
-      ? 'WebGPU / WASM Ready'
+      ? 'WebGPU / AI Engine Ready'
       : 'WASM High-Precision Ready';
 
     return this.runtimeInfo;
@@ -173,101 +232,79 @@ export class ImageCoreEngine {
     return this.usingAIUpscaledBase;
   }
 
-  declineSwin2SRDownload() {
+  isCropped() {
+    return this.croppedState;
+  }
+
+  getBaseDimensions() {
+    return {
+      width: this.originalWidth,
+      height: this.originalHeight
+    };
+  }
+
+  declineSwin2SRDownload(remember = true) {
     if (this._swin2srState !== 'ready') {
       this._swin2srState = 'declined';
     }
+    if (remember) {
+      this.saveConsentPreference('no');
+    } else {
+      this.clearConsentPreference();
+    }
   }
 
   /**
-   * ユーザーが「Yes」を押した後に呼び出されるSwin2SRランタイム＆モデルのダウンロード処理
+   * Swin2SRモデルをダウンロード＆初期化する
    */
-  async prepareSwin2SRModel(onProgress) {
-    if (this._swin2srPipeline && this._swin2srState === 'ready') {
+  async downloadSwin2SRModel(onProgress) {
+    if (this._swin2srPipeline) {
+      this._swin2srState = 'ready';
       return true;
     }
-    if (this._modelLoadPromise) {
-      return this._modelLoadPromise;
+    if (!this._transformersModule || typeof this._transformersModule.pipeline !== 'function') {
+      this._swin2srState = 'unavailable';
+      throw new Error('AI推論ランタイムがロードされていません');
     }
 
     this._swin2srState = 'loading';
-
-    this._modelLoadPromise = (async () => {
-      try {
-        // 1. Transformers.js ランタイムの動的取得（v3公式CDN → v2フォールバック、15秒タイムアウト）
-        if (!this._transformersModule) {
-          try {
-            const modV3 = await withTimeout(
-              import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2'),
-              15000,
-              'CDN接続タイムアウト'
-            );
-            this._transformersModule = modV3;
-            this._isV3Runtime = true;
-          } catch (_) {
-            const modV2 = await withTimeout(
-              import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js'),
-              15000,
-              'CDN接続タイムアウト'
-            );
-            this._transformersModule = modV2;
-            this._isV3Runtime = false;
-          }
-
-          if (this._transformersModule && this._transformersModule.env) {
-            this._transformersModule.env.allowLocalModels = false;
+    try {
+      this._swin2srPipeline = await this._transformersModule.pipeline(
+        'image-to-image',
+        SWIN2SR_MODEL_ID,
+        {
+          quantized: true,
+          progress_callback: (prog) => {
+            if (typeof onProgress === 'function') onProgress(prog);
           }
         }
-
-        if (typeof onProgress === 'function') {
-          onProgress({ status: 'runtime' });
-        }
-
-        // 2. Swin2SR モデルのダウンロード＆WASMパイプライン初期化
-        const pipelineOptions = this._isV3Runtime
-          ? {
-              dtype: 'q8',
-              device: 'wasm',
-              progress_callback: (p) => { if (typeof onProgress === 'function') onProgress(p); }
-            }
-          : {
-              quantized: true,
-              progress_callback: (p) => { if (typeof onProgress === 'function') onProgress(p); }
-            };
-
-        this._swin2srPipeline = await this._transformersModule.pipeline(
-          'image-to-image',
-          SWIN2SR_MODEL_ID,
-          pipelineOptions
-        );
-
-        this._swin2srState = 'ready';
-        return true;
-      } catch (err) {
-        this._swin2srState = 'unavailable';
-        throw err;
-      } finally {
-        this._modelLoadPromise = null;
-      }
-    })();
-
-    return this._modelLoadPromise;
+      );
+      this._swin2srState = 'ready';
+      return true;
+    } catch (err) {
+      this._swin2srState = 'unavailable';
+      throw new Error('Swin2SRモデルのダウンロードに失敗しました');
+    }
   }
 
   /**
-   * 準備済みのSwin2SRパイプラインを用いて現在読み込まれている画像を超解像推論する
+   * 現在のアクティブベース画像 (sourceCanvas) に対してSwin2SR超解像推論を実行する
+   * ※トリミング済みの場合は、トリミングされた領域に対して高効率にAI推論が掛かります
    */
-  async runSwin2SRInference() {
+  async runSwin2SRSuperResolution(onProgress) {
     if (!this.imageLoaded) {
       throw new Error('画像が読み込まれていません');
     }
-    if (!this._swin2srPipeline || this._swin2srState !== 'ready') {
-      throw new Error('Swin2SRモデルが準備されていません');
+    if (!this._swin2srPipeline) {
+      await this.downloadSwin2SRModel(onProgress);
     }
 
-    // ブラウザのメモリ溢れ(OOM)を防ぐため入力長辺を安全サイズに収める
-    let inW = this.rawSourceCanvas.width;
-    let inH = this.rawSourceCanvas.height;
+    if (typeof onProgress === 'function') {
+      onProgress({ status: 'inference' });
+    }
+
+    let inW = this.sourceCanvas.width;
+    let inH = this.sourceCanvas.height;
     if (inW > MAX_SWIN2SR_INPUT_EDGE || inH > MAX_SWIN2SR_INPUT_EDGE) {
       const ratio = Math.min(MAX_SWIN2SR_INPUT_EDGE / inW, MAX_SWIN2SR_INPUT_EDGE / inH);
       inW = Math.max(16, Math.round(inW * ratio));
@@ -280,16 +317,15 @@ export class ImageCoreEngine {
     const inCtx = inputCanvas.getContext('2d');
     inCtx.imageSmoothingEnabled = true;
     inCtx.imageSmoothingQuality = 'high';
-    inCtx.drawImage(this.rawSourceCanvas, 0, 0, inW, inH);
+    inCtx.drawImage(this.sourceCanvas, 0, 0, inW, inH);
     const dataUrl = inputCanvas.toDataURL('image/png');
 
-    await new Promise(r => setTimeout(r, 40));
-    const rawResult = await this._swin2srPipeline(dataUrl);
-    const outputRawImage = Array.isArray(rawResult) ? rawResult[0] : rawResult;
+    await new Promise(r => setTimeout(r, 30));
+    const outputRawImage = await this._swin2srPipeline(dataUrl);
 
     const outW = outputRawImage.width;
     const outH = outputRawImage.height;
-    const channels = outputRawImage.channels || Math.round(outputRawImage.data.length / (outW * outH));
+    const channels = outputRawImage.channels || (outputRawImage.data.length / (outW * outH));
     const outImageData = new ImageData(outW, outH);
     const dst = outImageData.data;
     const src = outputRawImage.data;
@@ -328,6 +364,52 @@ export class ImageCoreEngine {
     return { width: outW, height: outH };
   }
 
+  // ====== トリミング（切り抜き）機能 ======
+
+  /**
+   * 正規化座標 (0.0 ~ 1.0) を受け取り、現在のアクティブベース画像を切り抜く
+   */
+  applyCropNormalized(normRect) {
+    if (!this.imageLoaded) return;
+    const srcW = this.sourceCanvas.width;
+    const srcH = this.sourceCanvas.height;
+
+    const cx = Math.max(0, Math.min(srcW - 4, Math.round(normRect.x * srcW)));
+    const cy = Math.max(0, Math.min(srcH - 4, Math.round(normRect.y * srcH)));
+    const cw = Math.max(4, Math.min(srcW - cx, Math.round(normRect.w * srcW)));
+    const ch = Math.max(4, Math.min(srcH - cy, Math.round(normRect.h * srcH)));
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = cw;
+    tempCanvas.height = ch;
+    const tCtx = tempCanvas.getContext('2d');
+    tCtx.drawImage(this.sourceCanvas, cx, cy, cw, ch, 0, 0, cw, ch);
+
+    this.sourceCanvas.width = cw;
+    this.sourceCanvas.height = ch;
+    this.sourceCtx.clearRect(0, 0, cw, ch);
+    this.sourceCtx.drawImage(tempCanvas, 0, 0);
+
+    this.originalWidth = cw;
+    this.originalHeight = ch;
+    this.croppedState = true;
+    // トリミング後は座標系が変わるため既存のモザイク領域をクリア
+    this.mosaicRegions = [];
+
+    tempCanvas.width = 0;
+    tempCanvas.height = 0;
+  }
+
+  /**
+   * トリミングを解除し、読み込んだ直後の元画像に戻す
+   */
+  resetCrop() {
+    this.resetToOriginalSource();
+  }
+
+  /**
+   * トリミング・Swin2SR適用状態を解除し、読み込んだ直後の元画像に戻す
+   */
   resetToOriginalSource() {
     if (!this.imageLoaded) return;
     const w = this.rawSourceCanvas.width;
@@ -339,6 +421,7 @@ export class ImageCoreEngine {
     this.sourceCtx.clearRect(0, 0, w, h);
     this.sourceCtx.drawImage(this.rawSourceCanvas, 0, 0);
     this.usingAIUpscaledBase = false;
+    this.croppedState = false;
   }
 
   async _verifyMagicBytes(file) {
@@ -406,6 +489,7 @@ export class ImageCoreEngine {
 
       this.imageLoaded = true;
       this.usingAIUpscaledBase = false;
+      this.croppedState = false;
       this.mosaicRegions = [];
 
       return { width: w, height: h };
@@ -473,7 +557,8 @@ export class ImageCoreEngine {
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.imageSmoothingQuality = 'high';
     this.ctx.clearRect(0, 0, w, h);
-    this.ctx.drawImage(this.rawSourceCanvas, 0, 0, w, h);
+    // トリミング済みの場合は切り抜き後の未加工ベース画像、未トリミングなら初期画像を表示
+    this.ctx.drawImage(this.sourceCanvas, 0, 0, w, h);
     this.ctx.restore();
   }
 
