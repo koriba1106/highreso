@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <!-- セキュリティ対策: 厳格な Content Security Policy -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.hf.co; worker-src 'self' blob:;">
-  <title>簡易画像処理 by 武庫</title>
+  <!-- セキュリティ対策: Content Security Policy (GitHub Pages / CDN / HuggingFace Hub 対応) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' blob: data: https://cdn.jsdelivr.net https://huggingface.co https://*.hf.co; worker-src 'self' blob:;">
+  <title>簡易画像修正 by 武庫</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
   <header class="app-header">
     <div class="brand">
       <span class="brand-icon" aria-hidden="true">▣</span>
-      <h1>簡易画像処理 by 武庫</h1>
+      <h1>簡易画像修正 by 武庫</h1>
       <span id="engine-badge" class="badge badge-loading">エンジン初期化中...</span>
     </div>
     <div class="header-actions">
@@ -21,7 +21,7 @@
         <span>📂 画像を開く</span>
         <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
       </label>
-      <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 長押しで元画像表示</button>
+      <button id="btn-compare" class="btn btn-secondary" disabled title="押している間、処理前の元画像を表示します">👁️ 元画像と比較</button>
       <button id="btn-reset-all" class="btn btn-secondary" disabled>↺ リセット</button>
       <button id="btn-download" class="btn btn-primary" disabled>💾 保存</button>
     </div>
@@ -67,9 +67,32 @@
 
     <!-- コントロールパネル（PC: 右側 / スマホ: 下側） -->
     <aside class="control-panel" aria-label="画像調整コントロールパネル">
-      <!-- プリセット（8種類ワンタッチ適用） -->
+      <!-- プリセット＆最上部Swin2SRディープラーニングボタン -->
       <section class="panel-section">
-        <h2 class="section-title">✨ ワンタッチ（元画像に対して処理）<BR>処理後画像にはパラメータで調整</h2>
+        <h2 class="section-title">✨ AI超解像 ＆ ワンタッチ・プリセット</h2>
+
+        <!-- プリセット最上部: ディープラーニングモデル (Swin2SR) 専用ボックス -->
+        <div class="ai-sr-box">
+          <div class="ai-sr-status-row">
+            <span class="ai-sr-label">Swin2SR AIモデル状態:</span>
+            <span id="swin2sr-status-badge" class="ai-status-pill status-unloaded">未取得 (確認待ち)</span>
+          </div>
+          <button id="btn-swin2sr" class="btn btn-ai-sr" disabled>
+            🧠 AI超解像 (Swin2SR) で推論実行
+          </button>
+          <!-- ダウンロード進捗バー（初回取得時のみ表示） -->
+          <div id="ai-progress-wrap" class="ai-progress-wrap hidden">
+            <div class="ai-progress-bar">
+              <div id="ai-progress-fill" class="ai-progress-fill"></div>
+            </div>
+            <span id="ai-progress-text" class="ai-progress-text">モデル取得中... 0%</span>
+          </div>
+          <p id="ai-sr-note" class="control-hint">
+            ※初回実行時にダウンロード確認(Yes/No)が表示されます。No選択時は高速な数式アルゴリズムで代替処理します。
+          </p>
+        </div>
+
+        <!-- 8種類のプリセットボタン -->
         <div class="preset-grid" id="preset-grid">
           <button class="preset-btn" data-preset="ai_hd" disabled>① くっきり高精細</button>
           <button class="preset-btn" data-preset="doc_clear" disabled>② 書類・文字鮮明化</button>
@@ -92,7 +115,7 @@
         <!-- ① 画像を高解像度化 -->
         <div class="control-group">
           <div class="control-header" data-reset-target="param-superres" data-default="0" title="ダブルクリックで初期値(0)に戻す">
-            <label for="param-superres">① 高解像度化 (AI / 密度補間)</label>
+            <label for="param-superres">① 高解像度化 (密度補間アルゴリズム)</label>
             <span id="val-superres" class="param-value">OFF (0)</span>
           </div>
           <input type="range" id="param-superres" class="param-slider" min="0" max="100" step="1" value="0" disabled>
@@ -107,7 +130,7 @@
           <input type="range" id="param-detail" class="param-slider" min="0" max="100" step="1" value="0" disabled>
         </div>
 
-        <!-- 新設: シャープネス (1〜10段階 + OFF) -->
+        <!-- シャープネス (1〜10段階 + OFF) -->
         <div class="control-group">
           <div class="control-header" data-reset-target="param-sharpness" data-default="0" title="ダブルクリックで初期値(OFF)に戻す">
             <label for="param-sharpness">★ シャープネス (1〜10段階)</label>
@@ -179,6 +202,32 @@
     </aside>
   </main>
 
+  <!-- ページ最下部: 各種ライセンス＆ローカル処理表記フッター -->
+  <footer class="app-footer">
+    <span>🔒 プライバシー保護: 画像データはブラウザ内でのみ処理され外部サーバーへ一切送信されません</span>
+    <span class="footer-sep">|</span>
+    <span>Licenses: Application Code (MIT) / @xenova/transformers (Apache-2.0) / ONNX Runtime Web (MIT) / Swin2SR Model (Apache-2.0)</span>
+  </footer>
+
+  <!-- 初回ダウンロード時の Yes / No 明示確認モーダル -->
+  <div id="ai-consent-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <h3 id="modal-title" class="modal-title">🧠 ディープラーニングモデル (Swin2SR) のダウンロード確認</h3>
+      <p class="modal-desc">
+        超解像AIモデル（<code>Xenova/swin2SR-classical-sr-x2-64</code>）をブラウザにダウンロードして推論を実行しますか？
+      </p>
+      <ul class="modal-list">
+        <li><strong>初回通信量:</strong> 約 15MB 〜 30MB（ブラウザにキャッシュされ、2回目以降の通信は発生しません）</li>
+        <li><strong>安全性:</strong> 推論はお使いの端末内（WebGPU / WASM）で実行され、画像が外部に送信されることはありません。</li>
+        <li><strong>「No」を選択した場合:</strong> ダウンロードを行わず、現在内蔵されている<strong>「高速・軽量な数式アルゴリズム」</strong>の最大性能で高解像度・高精細化処理を適用します。</li>
+      </ul>
+      <div class="modal-actions">
+        <button id="btn-consent-no" class="btn btn-secondary">No (ダウンロードせず高速数式アルゴリズムで処理)</button>
+        <button id="btn-consent-yes" class="btn btn-primary">Yes (ダウンロードしてAI推論を実行)</button>
+      </div>
+    </div>
+  </div>
+
   <!-- トースト通知 -->
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
@@ -201,6 +250,16 @@
       btnCompare: document.getElementById('btn-compare'),
       btnResetAll: document.getElementById('btn-reset-all'),
       btnDownload: document.getElementById('btn-download'),
+      // Swin2SR AI関連UI
+      btnSwin2sr: document.getElementById('btn-swin2sr'),
+      swin2srBadge: document.getElementById('swin2sr-status-badge'),
+      aiProgressWrap: document.getElementById('ai-progress-wrap'),
+      aiProgressFill: document.getElementById('ai-progress-fill'),
+      aiProgressText: document.getElementById('ai-progress-text'),
+      aiSrNote: document.getElementById('ai-sr-note'),
+      aiConsentModal: document.getElementById('ai-consent-modal'),
+      btnConsentYes: document.getElementById('btn-consent-yes'),
+      btnConsentNo: document.getElementById('btn-consent-no'),
       // 表示ズーム (20%〜300% 10%単位)
       viewZoomSlider: document.getElementById('view-zoom-slider'),
       viewZoomLabel: document.getElementById('view-zoom-label'),
@@ -240,11 +299,39 @@
     let currentRect = null;
     let renderDebounceTimer = null;
 
-    function showToast(msg, duration = 2800) {
+    function showToast(msg, duration = 3200) {
       els.toast.textContent = msg;
       els.toast.classList.remove('hidden');
       clearTimeout(els.toast._timer);
       els.toast._timer = setTimeout(() => els.toast.classList.add('hidden'), duration);
+    }
+
+    // Swin2SRモデル利用可否ステータスのUI更新
+    function updateSwin2SRStatusUI() {
+      const state = engine.getSwin2SRState();
+      els.swin2srBadge.className = 'ai-status-pill';
+      if (state === 'ready') {
+        els.swin2srBadge.textContent = '利用可能 (Swin2SR 準備完了)';
+        els.swin2srBadge.classList.add('status-ready');
+        els.btnSwin2sr.textContent = engine.isUsingAIUpscaledBase()
+          ? '✅ Swin2SR AI超解像 適用中 (再推論)'
+          : '🧠 AI超解像 (Swin2SR) で推論実行';
+      } else if (state === 'loading') {
+        els.swin2srBadge.textContent = 'モデル取得・初期化中...';
+        els.swin2srBadge.classList.add('status-loading');
+      } else if (state === 'declined') {
+        els.swin2srBadge.textContent = '利用不可 (DL拒否・高速数式モード)';
+        els.swin2srBadge.classList.add('status-declined');
+        els.btnSwin2sr.textContent = '⚡ 高速数式アルゴリズムで超解像を実行 (AI再確認も可)';
+      } else if (state === 'unavailable') {
+        els.swin2srBadge.textContent = '利用不可 (環境非対応・高速数式モード)';
+        els.swin2srBadge.classList.add('status-declined');
+        els.btnSwin2sr.textContent = '⚡ 高速数式アルゴリズムで超解像を実行';
+      } else {
+        els.swin2srBadge.textContent = '未取得 (初回確認待ち)';
+        els.swin2srBadge.classList.add('status-unloaded');
+        els.btnSwin2sr.textContent = '🧠 AI超解像 (Swin2SR) で推論実行';
+      }
     }
 
     // 初回起動時のAI / WebGPU・WASMエンジン初期化
@@ -256,11 +343,13 @@
       } catch (_) {
         els.engineBadge.textContent = 'WASM High-Precision Ready';
         els.engineBadge.className = 'badge badge-wasm';
+      } finally {
+        updateSwin2SRStatusUI();
       }
     }
     initApp();
 
-    // ファイル読み込み処理（マジックバイト検証含む）
+    // ファイル読み込み処理
     async function handleFile(file) {
       if (!file) return;
       setLoading(true, '画像を安全に検証・展開中...');
@@ -270,19 +359,20 @@
         els.scrollArea.classList.remove('hidden');
         enableControls(true);
         resetParametersUI();
+        updateSwin2SRStatusUI();
         await triggerProcess();
         showToast(`画像を読み込みました (${meta.width} × ${meta.height} px)`);
       } catch (err) {
         showToast(`エラー: ${err.message}`, 4500);
       } finally {
         setLoading(false);
-        els.fileInput.value = ''; // 同じファイルの再選択を許容
+        els.fileInput.value = '';
       }
     }
 
     function enableControls(enabled) {
       const inputs = [
-        els.btnCompare, els.btnResetAll, els.btnDownload,
+        els.btnCompare, els.btnResetAll, els.btnDownload, els.btnSwin2sr,
         els.paramSuperres, els.paramDetail, els.paramSharpness,
         els.paramScale, els.paramBrightness, els.paramContrast,
         els.paramMosaic, els.toggleMosaicMode
@@ -308,6 +398,7 @@
       els.paramContrast.value = 0;
       els.paramMosaic.value = 15;
       els.presetBtns.forEach(b => b.classList.remove('active'));
+      els.btnSwin2sr.classList.remove('active');
       updateParamLabels();
       updateMosaicButtonsUI();
     }
@@ -367,7 +458,8 @@
         if (resultInfo) {
           syncOverlaySize();
           applyViewZoom();
-          els.imageInfo.textContent = `出力: ${resultInfo.width} × ${resultInfo.height} px (${params.scale.toFixed(1)}x)`;
+          const modeLabel = engine.isUsingAIUpscaledBase() ? '[Swin2SR AI適用済]' : '[数式エンジン]';
+          els.imageInfo.textContent = `${modeLabel} 出力: ${resultInfo.width} × ${resultInfo.height} px (${params.scale.toFixed(1)}x)`;
         }
       } catch (err) {
         showToast(`処理エラー: ${err.message}`);
@@ -375,6 +467,97 @@
         if (isHeavy) setLoading(false);
       }
     }
+
+    // ====== Swin2SR ディープラーニング推論 ＆ フォールバック制御 ======
+
+    // 高速・軽量な数式アルゴリズムによる超解像代替プリセット適用
+    async function applyFastMathFallback(reasonMsg) {
+      els.presetBtns.forEach(b => b.classList.remove('active'));
+      els.btnSwin2sr.classList.add('active');
+
+      // 数式アルゴリズムの最大性能を引き出す最適パラメータをセット
+      els.paramSuperres.value = 85;
+      els.paramDetail.value = 50;
+      els.paramSharpness.value = 5;
+      if (Number(els.paramScale.value) === 1.0) {
+        els.paramScale.value = 2.0; // Swin2SR (x2) と同等の2倍拡大をデフォルト適用
+      }
+      updateSwin2SRStatusUI();
+      showToast(reasonMsg, 4000);
+      await triggerProcess();
+    }
+
+    // Swin2SRモデルのダウンロードと推論の実行
+    async function executeSwin2SRInference() {
+      els.aiProgressWrap.classList.remove('hidden');
+      els.aiProgressFill.style.width = '0%';
+      els.aiProgressText.textContent = 'Swin2SRモデル準備中...';
+      setLoading(true, 'ディープラーニング超解像 (Swin2SR) を実行中...');
+      updateSwin2SRStatusUI();
+
+      try {
+        const res = await engine.runSwin2SRSuperResolution((progressObj) => {
+          if (progressObj.status === 'progress' && typeof progressObj.progress === 'number') {
+            const pct = Math.round(progressObj.progress);
+            els.aiProgressFill.style.width = `${pct}%`;
+            els.aiProgressText.textContent = `モデルダウンロード中 (${progressObj.file || 'onnx'})... ${pct}%`;
+          } else if (progressObj.status === 'inference') {
+            els.aiProgressFill.style.width = '100%';
+            els.aiProgressText.textContent = 'ニューラルネットワーク推論を実行中...';
+            els.processingText.textContent = 'Swin2SR ニューラルネット推論中 (数秒かかります)...';
+          }
+        });
+
+        els.aiProgressWrap.classList.add('hidden');
+        els.btnSwin2sr.classList.add('active');
+        // AI超解像がベース画像に適用されたため、数式側の多重シャープ化を抑えて自然にする
+        els.paramSuperres.value = 25;
+        els.paramDetail.value = 25;
+        els.paramSharpness.value = 2;
+        els.paramScale.value = 1.0; // すでにベースがSwin2SRで拡大されているため1.0xで高解像度化済み
+
+        updateSwin2SRStatusUI();
+        await triggerProcess();
+        showToast(`Swin2SR AI超解像が完了しました (${res.width} × ${res.height} px)`, 4000);
+      } catch (err) {
+        els.aiProgressWrap.classList.add('hidden');
+        updateSwin2SRStatusUI();
+        // 通信エラーやWebAssemblyメモリ制限時は数式アルゴリズムへ自動フォールバック
+        await applyFastMathFallback(`AIモデル推論を利用できないため、高速数式アルゴリズムで高解像度化しました (${err.message})`);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    // Swin2SRボタン押下時のハンドラ
+    els.btnSwin2sr.addEventListener('click', async () => {
+      if (!engine.hasImage()) return;
+      const state = engine.getSwin2SRState();
+
+      if (state === 'ready') {
+        // すでにダウンロード済みの場合は確認なしで即推論
+        await executeSwin2SRInference();
+      } else if (state === 'unavailable') {
+        // CDN遮断等でTransformers.js自体がロードできなかった場合は数式アルゴリズムで実行
+        await applyFastMathFallback('AIランタイム非対応環境のため、高速数式アルゴリズムで超解像処理を実行しました');
+      } else {
+        // 未取得('unloaded') または 以前拒否('declined') の場合は明示的な Yes/No モーダルを表示
+        els.aiConsentModal.classList.remove('hidden');
+      }
+    });
+
+    // モーダルで「Yes (ダウンロードしてAI推論を実行)」を選択
+    els.btnConsentYes.addEventListener('click', async () => {
+      els.aiConsentModal.classList.add('hidden');
+      await executeSwin2SRInference();
+    });
+
+    // モーダルで「No (ダウンロード拒否・高速数式アルゴリズムで処理)」を選択
+    els.btnConsentNo.addEventListener('click', async () => {
+      els.aiConsentModal.classList.add('hidden');
+      engine.declineSwin2SRDownload();
+      await applyFastMathFallback('ダウンロードをキャンセルし、高速・軽量な数式アルゴリズムで高解像度化を実行しました');
+    });
 
     // 表示ズーム（20%〜300% 10%単位）の適用
     function applyViewZoom(newZoom) {
@@ -447,7 +630,6 @@
 
     // ====== イベントリスナー登録 ======
 
-    // ファイル選択・ドラッグ＆ドロップ
     els.fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
     els.dropZone.addEventListener('dragover', e => {
       e.preventDefault();
@@ -509,7 +691,7 @@
       });
     });
 
-    // 元画像と比較ボタン（押している間だけ元画像を表示）
+    // 元画像と比較ボタン（押している間だけ処理前の元画像を表示）
     const startCompare = e => {
       if (!engine.hasImage()) return;
       e.preventDefault();
@@ -612,12 +794,15 @@
       scheduleProcess(true);
     });
 
+    // 全リセットボタン（Swin2SR適用状態も元の画像に戻す）
     els.btnResetAll.addEventListener('click', () => {
+      engine.resetToOriginalSource();
       engine.clearMosaicRegions();
       resetParametersUI();
+      updateSwin2SRStatusUI();
       applyViewZoom(100);
       scheduleProcess(true);
-      showToast('すべての設定を初期状態に戻しました');
+      showToast('すべての設定とAI適用状態を初期画像に戻しました');
     });
 
     els.btnDownload.addEventListener('click', async () => {

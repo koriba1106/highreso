@@ -19,10 +19,18 @@
   --accent-hover: #1d4ed8;
   --accent-subtle: #dbeafe;
 
+  --ai-primary: #4f46e5;
+  --ai-hover: #4338ca;
+  --ai-subtle: #e0e7ff;
+
   --status-ready-bg: #dcfce7;
   --status-ready-text: #166534;
   --status-wasm-bg: #e0f2fe;
   --status-wasm-text: #075985;
+  --status-warn-bg: #fef3c7;
+  --status-warn-text: #92400e;
+  --status-declined-bg: #f3f4f6;
+  --status-declined-text: #4b5563;
 
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -50,15 +58,14 @@ html, body {
   user-select: none;
 }
 
-/* キーボード操作時のアクセシビリティ・フォーカスリング */
 :focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
 
-/* ====== ヘッダー ====== */
+/* ====== ヘッダー (52px) ====== */
 .app-header {
-  height: 56px;
+  height: 52px;
   background-color: var(--bg-panel);
   border-bottom: 1px solid var(--border-color);
   display: flex;
@@ -120,7 +127,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 36px;
+  height: 34px;
   padding: 0 12px;
   font-size: 13px;
   font-weight: 600;
@@ -199,11 +206,11 @@ html, body {
   background: var(--bg-hover);
 }
 
-/* ====== メインワークスペース (PC: 左右分割) ====== */
+/* ====== メインワークスペース (ヘッダー52px + フッター24px を除いた領域) ====== */
 .workspace {
   display: flex;
-  height: calc(100vh - 56px);
-  height: calc(100dvh - 56px);
+  height: calc(100vh - 76px);
+  height: calc(100dvh - 76px);
   width: 100vw;
 }
 
@@ -291,14 +298,14 @@ html, body {
 /* 下部フローティング・ズームバー */
 .viewport-toolbar {
   position: absolute;
-  bottom: 14px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   background: rgba(247, 248, 250, 0.95);
   backdrop-filter: blur(6px);
   border: 1px solid var(--border-color);
   border-radius: 999px;
-  padding: 6px 16px;
+  padding: 5px 16px;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -337,14 +344,14 @@ html, body {
 
 /* ====== 右側コントロールパネル ====== */
 .control-panel {
-  width: 375px;
+  width: 385px;
   background-color: var(--bg-panel);
   border-left: 1px solid var(--border-color);
   overflow-y: auto;
-  padding: 14px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   z-index: 15;
 }
 
@@ -352,7 +359,7 @@ html, body {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 14px;
+  padding: 12px 14px;
   box-shadow: var(--shadow-sm);
 }
 
@@ -372,11 +379,106 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .section-header-row .section-title {
   margin-bottom: 0;
+}
+
+/* ====== プリセット最上部: Swin2SR AI超解像ボックス ====== */
+.ai-sr-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.ai-sr-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.ai-sr-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ai-status-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.status-unloaded {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-text);
+}
+
+.status-loading {
+  background: var(--status-wasm-bg);
+  color: var(--status-wasm-text);
+}
+
+.status-ready {
+  background: var(--status-ready-bg);
+  color: var(--status-ready-text);
+}
+
+.status-declined {
+  background: var(--status-declined-bg);
+  color: var(--status-declined-text);
+}
+
+.btn-ai-sr {
+  width: 100%;
+  height: 36px;
+  background-color: var(--ai-primary);
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+}
+
+.btn-ai-sr:not(:disabled):hover {
+  background-color: var(--ai-hover);
+}
+
+.btn-ai-sr.active {
+  box-shadow: 0 0 0 2px var(--ai-subtle), 0 0 0 4px var(--ai-primary);
+}
+
+.ai-progress-wrap {
+  margin-top: 8px;
+}
+
+.ai-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--border-color);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.ai-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: var(--ai-primary);
+  transition: width 0.2s ease;
+}
+
+.ai-progress-text {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 8種プリセットグリッド */
@@ -390,7 +492,7 @@ html, body {
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 7px 10px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
@@ -417,7 +519,7 @@ html, body {
 
 /* パラメータスライダー群 */
 .control-group {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .control-group:last-child {
@@ -428,7 +530,7 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -459,7 +561,8 @@ html, body {
 .control-hint {
   font-size: 11px;
   color: var(--text-muted);
-  margin-top: 3px;
+  margin-top: 4px;
+  line-height: 1.4;
 }
 
 /* トグルスイッチ (モザイク範囲選択) */
@@ -509,7 +612,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .mosaic-count {
@@ -517,6 +620,88 @@ html, body {
   font-size: 12px;
   color: var(--text-muted);
   font-weight: 600;
+}
+
+/* ====== ページ最下部: ライセンス表示フッター (24px) ====== */
+.app-footer {
+  height: 24px;
+  background-color: var(--bg-panel);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 12px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 20;
+}
+
+.footer-sep {
+  color: var(--border-color);
+}
+
+/* ====== 初回ダウンロード確認 Yes/No モーダル ====== */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 200;
+}
+
+.modal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-width: 500px;
+  width: 100%;
+  padding: 20px;
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.modal-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.modal-desc code {
+  background: var(--bg-app);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.modal-list {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-left: 18px;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* オーバーレイ・トースト */
@@ -550,7 +735,7 @@ html, body {
 
 .toast {
   position: fixed;
-  top: 68px;
+  top: 64px;
   left: 50%;
   transform: translateX(-50%);
   background: #1f2937;
@@ -560,8 +745,10 @@ html, body {
   font-size: 13px;
   font-weight: 500;
   box-shadow: var(--shadow-md);
-  z-index: 100;
+  z-index: 150;
   pointer-events: none;
+  max-width: 92vw;
+  text-align: center;
 }
 
 .hidden {
@@ -579,7 +766,8 @@ html, body {
   }
 
   .badge,
-  .section-sub-hint {
+  .section-sub-hint,
+  .footer-sep {
     display: none;
   }
 
@@ -593,7 +781,7 @@ html, body {
   }
 
   .viewport-container {
-    height: 44dvh;
+    height: 42dvh;
     flex: none;
   }
 
@@ -609,7 +797,7 @@ html, body {
 
   .control-panel {
     width: 100%;
-    height: calc(56dvh - 56px);
+    height: calc(58dvh - 76px);
     border-left: none;
     border-top: 1px solid var(--border-color);
     padding: 10px;
@@ -617,5 +805,19 @@ html, body {
 
   .param-slider {
     height: 10px;
+  }
+
+  .app-footer {
+    font-size: 9.5px;
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+
+  .modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .modal-actions .btn {
+    width: 100%;
   }
 }

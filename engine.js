@@ -1,10 +1,10 @@
 /**
  * engine.js
- * 画像処理コアエンジン（WebGPU / WASM 動的ローダー + 高精度ピクセルパイプライン）
- * 一流メーカー出荷基準のメモリ再利用・マジックバイト検証・非同期排他制御を搭載
+ * 画像処理コアエンジン（Swin2SR ディープラーニング推論 + 高精度数式ピクセルパイプライン）
+ * 初回同意に基づくオンデマンドAIモデル取得・フォールバック・省メモリ再利用設計
  */
 
-// 8種類の厳選ワンタッチ・プリセット定義（シャープネス 1〜10段階 統合済み）
+// 8種類の厳選ワンタッチ・プリセット定義
 export const PRESETS = Object.freeze({
   ai_hd: {
     name: '① くっきり高精細',
@@ -80,9 +80,11 @@ export const PRESETS = Object.freeze({
   }
 });
 
-// 安全制限値（モバイル・PCブラウザ共通のOOMクラッシュ防止上限）
 const MAX_FILE_SIZE_BYTES = 35 * 1024 * 1024; // 35MB上限
 const MAX_OUTPUT_DIMENSION = 4096; // 最大4096px
+// Swin2SRモデル推論時のブラウザメモリクラッシュ(OOM)を防ぐ安全入力上限（長辺640px → 出力1280px）
+const MAX_SWIN2SR_INPUT_EDGE = 640;
+const SWIN2SR_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
 
 export class ImageCoreEngine {
   /**
@@ -95,32 +97,40 @@ export class ImageCoreEngine {
     this.canvas = targetCanvas;
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
 
-    // 元画像の保持用オフスクリーンバッファ
+    // ユーザーが読み込んだ純粋な元画像（リセット・比較用）
+    this.rawSourceCanvas = document.createElement('canvas');
+    this.rawSourceCtx = this.rawSourceCanvas.getContext('2d', { willReadFrequently: true });
+
+    // パイプラインの起点となるベース画像（通常は元画像、Swin2SR実行後はAI超解像画像）
     this.sourceCanvas = document.createElement('canvas');
     this.sourceCtx = this.sourceCanvas.getContext('2d', { willReadFrequently: true });
 
-    // ワーク用オフスクリーンバッファ（GC負荷を抑えるため使い回す）
+    // ワーク用オフスクリーンバッファ
     this.workCanvas = document.createElement('canvas');
     this.workCtx = this.workCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 超解像・段階補間用の一時キャンバス（再利用）
+    // 超解像・段階補間用の一時キャンバス
     this.stepCanvas = document.createElement('canvas');
     this.stepCtx = this.stepCanvas.getContext('2d', { willReadFrequently: true });
 
-    // メモリ再確保（GCスパイク）を防ぐための再利用TypedArrayキャッシュ
     this._scratchBuffer = null;
     this._lastProcessedImageData = null;
 
     this.originalWidth = 0;
     this.originalHeight = 0;
     this.imageLoaded = false;
+    this.usingAIUpscaledBase = false;
 
-    // モザイク選択領域（0.0〜1.0の正規化座標配列）
     this.mosaicRegions = [];
 
-    // 非同期レンダリングの排他制御用フラグ
     this._isProcessing = false;
     this._pendingParams = null;
+
+    // Transformers.js モジュール参照とSwin2SRパイプライン状態
+    this._transformersModule = null;
+    this._swin2srPipeline = null;
+    // 'unloaded' | 'loading' | 'ready' | 'declined' | 'unavailable'
+    this._swin2srState = 'unloaded';
 
     this.runtimeInfo = {
       isWebGPU: false,
@@ -130,7 +140,8 @@ export class ImageCoreEngine {
   }
 
   /**
-   * 初回起動時にWebGPU / WASM環境を検出し、CDNからAI推論ランタイムを非同期取得
+   * 初回起動時にWebGPU / WASM環境を検出し、Transformers.js ランタイム本体（軽量スクリプト）のみを準備
+   * ※Swin2SRモデル本体（約15〜30MB）はユーザーのYes同意があるまで一切ダウンロードしません
    */
   async initializeRuntime() {
     const hasWebGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
@@ -150,10 +161,14 @@ export class ImageCoreEngine {
       const mod = await import(cdnUrl);
       if (mod && mod.env) {
         mod.env.allowLocalModels = false;
+        this._transformersModule = mod;
         this.runtimeInfo.ortLoaded = true;
+      } else {
+        this._swin2srState = 'unavailable';
       }
     } catch (_) {
       this.runtimeInfo.ortLoaded = false;
+      this._swin2srState = 'unavailable';
     }
 
     this.runtimeInfo.isWebGPU = adapterAvailable;
@@ -165,8 +180,146 @@ export class ImageCoreEngine {
   }
 
   /**
-   * ファイルのバイナリヘッダー（マジックバイト）を直接検査して偽装ファイルを排除
-   * @param {File} file
+   * Swin2SRモデルの現在の利用可否状態を返す
+   */
+  getSwin2SRState() {
+    return this._swin2srState;
+  }
+
+  isUsingAIUpscaledBase() {
+    return this.usingAIUpscaledBase;
+  }
+
+  /**
+   * ユーザーがSwin2SRのダウンロードを「No（拒否）」した際の状態更新
+   */
+  declineSwin2SRDownload() {
+    if (this._swin2srState !== 'ready') {
+      this._swin2srState = 'declined';
+    }
+  }
+
+  /**
+   * ユーザーが「Yes」を選択した際にSwin2SRモデルをダウンロードし、超解像推論を実行する
+   * @param {Function} onProgress 進捗コールバック
+   */
+  async runSwin2SRSuperResolution(onProgress) {
+    if (!this.imageLoaded) {
+      throw new Error('画像が読み込まれていません');
+    }
+    if (!this._transformersModule || typeof this._transformersModule.pipeline !== 'function') {
+      this._swin2srState = 'unavailable';
+      throw new Error('AI推論ランタイムが読み込まれていません');
+    }
+
+    // パイプライン未構築の場合はダウンロード＆初期化
+    if (!this._swin2srPipeline) {
+      this._swin2srState = 'loading';
+      try {
+        this._swin2srPipeline = await this._transformersModule.pipeline(
+          'image-to-image',
+          SWIN2SR_MODEL_ID,
+          {
+            quantized: true,
+            progress_callback: (prog) => {
+              if (typeof onProgress === 'function') onProgress(prog);
+            }
+          }
+        );
+        this._swin2srState = 'ready';
+      } catch (err) {
+        this._swin2srState = 'unavailable';
+        throw new Error('モデルのダウンロードまたは初期化に失敗しました');
+      }
+    }
+
+    if (typeof onProgress === 'function') {
+      onProgress({ status: 'inference' });
+    }
+
+    // メモリ保護: 元画像が大きすぎる場合はSwin2SRの安全入力サイズに収めてから推論にかける
+    let inW = this.rawSourceCanvas.width;
+    let inH = this.rawSourceCanvas.height;
+    if (inW > MAX_SWIN2SR_INPUT_EDGE || inH > MAX_SWIN2SR_INPUT_EDGE) {
+      const ratio = Math.min(MAX_SWIN2SR_INPUT_EDGE / inW, MAX_SWIN2SR_INPUT_EDGE / inH);
+      inW = Math.max(16, Math.round(inW * ratio));
+      inH = Math.max(16, Math.round(inH * ratio));
+    }
+
+    const inputCanvas = document.createElement('canvas');
+    inputCanvas.width = inW;
+    inputCanvas.height = inH;
+    const inCtx = inputCanvas.getContext('2d');
+    inCtx.imageSmoothingEnabled = true;
+    inCtx.imageSmoothingQuality = 'high';
+    inCtx.drawImage(this.rawSourceCanvas, 0, 0, inW, inH);
+    const dataUrl = inputCanvas.toDataURL('image/png');
+
+    // UIスレッドを1フレーム解放してから推論実行
+    await new Promise(r => setTimeout(r, 30));
+    const outputRawImage = await this._swin2srPipeline(dataUrl);
+
+    // RawImage (RGB または RGBA) を Canvas ImageData に変換
+    const outW = outputRawImage.width;
+    const outH = outputRawImage.height;
+    const channels = outputRawImage.channels || (outputRawImage.data.length / (outW * outH));
+    const outImageData = new ImageData(outW, outH);
+    const dst = outImageData.data;
+    const src = outputRawImage.data;
+
+    if (channels === 4) {
+      dst.set(src);
+    } else if (channels === 3) {
+      let sIdx = 0;
+      for (let dIdx = 0; dIdx < dst.length; dIdx += 4) {
+        dst[dIdx] = src[sIdx++];
+        dst[dIdx + 1] = src[sIdx++];
+        dst[dIdx + 2] = src[sIdx++];
+        dst[dIdx + 3] = 255;
+      }
+    } else {
+      let sIdx = 0;
+      for (let dIdx = 0; dIdx < dst.length; dIdx += 4) {
+        const v = src[sIdx++];
+        dst[dIdx] = v;
+        dst[dIdx + 1] = v;
+        dst[dIdx + 2] = v;
+        dst[dIdx + 3] = 255;
+      }
+    }
+
+    // ベース画像をSwin2SR推論結果に差し替え
+    this.sourceCanvas.width = outW;
+    this.sourceCanvas.height = outH;
+    this.sourceCtx.putImageData(outImageData, 0, 0);
+    this.originalWidth = outW;
+    this.originalHeight = outH;
+    this.usingAIUpscaledBase = true;
+
+    inputCanvas.width = 0;
+    inputCanvas.height = 0;
+
+    return { width: outW, height: outH };
+  }
+
+  /**
+   * Swin2SR適用状態を解除し、読み込んだ直後の元画像に戻す
+   */
+  resetToOriginalSource() {
+    if (!this.imageLoaded) return;
+    const w = this.rawSourceCanvas.width;
+    const h = this.rawSourceCanvas.height;
+    this.originalWidth = w;
+    this.originalHeight = h;
+    this.sourceCanvas.width = w;
+    this.sourceCanvas.height = h;
+    this.sourceCtx.clearRect(0, 0, w, h);
+    this.sourceCtx.drawImage(this.rawSourceCanvas, 0, 0);
+    this.usingAIUpscaledBase = false;
+  }
+
+  /**
+   * ファイルのバイナリヘッダー（マジックバイト）検査
    */
   async _verifyMagicBytes(file) {
     const slice = file.slice(0, 12);
@@ -176,14 +329,14 @@ export class ImageCoreEngine {
 
     // JPEG: FF D8 FF
     if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return true;
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    // PNG: 89 50 4E 47
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return true;
     // WebP: "RIFF" .... "WEBP"
     if (
       bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
       bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
     ) return true;
-    // BMP: "BM" (42 4D)
+    // BMP: "BM"
     if (bytes[0] === 0x42 && bytes[1] === 0x4D) return true;
 
     return false;
@@ -191,7 +344,6 @@ export class ImageCoreEngine {
 
   /**
    * 画像ファイルの厳格な検証とデコード読み込み
-   * @param {File} file
    */
   async loadImage(file) {
     if (!file || !(file instanceof Blob)) {
@@ -228,12 +380,21 @@ export class ImageCoreEngine {
 
       this.originalWidth = w;
       this.originalHeight = h;
+
+      // 元画像の保存
+      this.rawSourceCanvas.width = w;
+      this.rawSourceCanvas.height = h;
+      this.rawSourceCtx.clearRect(0, 0, w, h);
+      this.rawSourceCtx.drawImage(bitmap, 0, 0, w, h);
+
+      // パイプライン起点キャンバスへコピー
       this.sourceCanvas.width = w;
       this.sourceCanvas.height = h;
       this.sourceCtx.clearRect(0, 0, w, h);
       this.sourceCtx.drawImage(bitmap, 0, 0, w, h);
 
       this.imageLoaded = true;
+      this.usingAIUpscaledBase = false;
       this.mosaicRegions = [];
 
       return { width: w, height: h };
@@ -264,9 +425,6 @@ export class ImageCoreEngine {
     return this.imageLoaded;
   }
 
-  /**
-   * 再利用可能なスクラッチバッファの取得（GCによるメモリ断片化を防止）
-   */
   _getScratchBuffer(byteLength) {
     if (!this._scratchBuffer || this._scratchBuffer.length !== byteLength) {
       this._scratchBuffer = new Uint8ClampedArray(byteLength);
@@ -306,7 +464,8 @@ export class ImageCoreEngine {
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.imageSmoothingQuality = 'high';
     this.ctx.clearRect(0, 0, w, h);
-    this.ctx.drawImage(this.sourceCanvas, 0, 0, w, h);
+    // 常に最初期の純粋な元画像と比較できるようにする
+    this.ctx.drawImage(this.rawSourceCanvas, 0, 0, w, h);
     this.ctx.restore();
   }
 
@@ -323,7 +482,6 @@ export class ImageCoreEngine {
       throw new Error('画像が読み込まれていません');
     }
 
-    // すでに処理中の場合は最新パラメータを記録して待機（レースコンディション防止）
     if (this._isProcessing) {
       this._pendingParams = rawParams;
       return null;
@@ -345,16 +503,14 @@ export class ImageCoreEngine {
   }
 
   _executePipelineSync(rawParams) {
-    // パラメータのサニタイズと厳格な境界クランプ
     const scale = Math.min(3.0, Math.max(0.1, Math.round((Number(rawParams.scale) || 1.0) * 10) / 10));
     const superRes = Math.min(100, Math.max(0, Math.round(Number(rawParams.superResolution) || 0)));
     const detail = Math.min(100, Math.max(0, Math.round(Number(rawParams.detail) || 0)));
     const sharpness = Math.min(10, Math.max(0, Math.round(Number(rawParams.sharpness) || 0)));
     const brightness = Math.min(100, Math.max(-100, Math.round(Number(rawParams.brightness) || 0)));
     const contrast = Math.min(100, Math.max(-100, Math.round(Number(rawParams.contrast) || 0)));
-    const mosaicSize = Math.min(100, Math.max(2, Math.round(Number(rawParams.mosaicSize) || 15)));
+    const mosaicSize = Math.min(100, Math.max(2, Math.round(Number(rawParams.mosaicSize) || 15));
 
-    // 1. 出力サイズの算出（上限保護付き）
     let targetW = Math.max(1, Math.round(this.originalWidth * scale));
     let targetH = Math.max(1, Math.round(this.originalHeight * scale));
 
@@ -364,33 +520,32 @@ export class ImageCoreEngine {
       targetH = Math.max(1, Math.round(targetH * limitRatio));
     }
 
-    // 2. サイズ変更と高解像度ステップ補間 (機能① & 機能③)
+    // 1. サイズ変更と高解像度ステップ補間 (機能① & 機能③)
     this._stepResizeAndSuperRes(targetW, targetH, superRes);
 
     const imageData = this.workCtx.getImageData(0, 0, targetW, targetH);
     const data = imageData.data;
 
-    // 3. 明るさ・コントラスト調整 (機能④ - LUT高速演算)
+    // 2. 明るさ・コントラスト調整 (機能④)
     if (brightness !== 0 || contrast !== 0) {
       this._applyBrightnessContrastLUT(data, brightness, contrast);
     }
 
-    // 4. 高解像度化ディテール復元 + 高精細化マイクロコントラスト強調 (機能① & 機能②)
+    // 3. 高解像度ディテール復元 + 高精細化マイクロコントラスト強調 (機能① & 機能②)
     if (superRes > 0 || detail > 0) {
       this._applyHighDefinitionClarity(data, targetW, targetH, superRes, detail);
     }
 
-    // 5. 新設: シャープネス 1〜10段階 (3x3 ラプラシアン・ハイパス畳み込み)
+    // 4. シャープネス 1〜10段階 (3x3 ラプラシアン・ハイパス畳み込み)
     if (sharpness >= 1) {
       this._applySharpness10Levels(data, targetW, targetH, sharpness);
     }
 
-    // 6. 範囲指定モザイク処理 (機能⑤)
+    // 5. 範囲指定モザイク処理 (機能⑤)
     if (this.mosaicRegions.length > 0 && mosaicSize >= 2) {
       this._applyRegionalMosaic(data, targetW, targetH, mosaicSize);
     }
 
-    // メインキャンバスへ反映＆比較用に保持
     this.canvas.width = targetW;
     this.canvas.height = targetH;
     this.ctx.putImageData(imageData, 0, 0);
@@ -399,9 +554,6 @@ export class ImageCoreEngine {
     return { width: targetW, height: targetH };
   }
 
-  /**
-   * 段階的マルチステップスケーリング（ジャギー低減と超解像密度補間）
-   */
   _stepResizeAndSuperRes(targetW, targetH, superRes) {
     this.workCanvas.width = targetW;
     this.workCanvas.height = targetH;
@@ -428,9 +580,6 @@ export class ImageCoreEngine {
     }
   }
 
-  /**
-   * 256段階の事前計算LUT（ルックアップテーブル）による高速な明るさ・コントラスト補正
-   */
   _applyBrightnessContrastLUT(data, brightness, contrast) {
     const lut = new Uint8ClampedArray(256);
     const cFactor = (259 * (contrast + 255)) / (255 * (259 - contrast));
@@ -448,10 +597,6 @@ export class ImageCoreEngine {
     }
   }
 
-  /**
-   * ①高解像度化 ＆ ②高精細化（マイクロコントラスト・クラリティ強調）
-   * 中間調の立体感を保ちながら微細なテクスチャを引き出すエッジ保護フィルタ
-   */
   _applyHighDefinitionClarity(data, width, height, superRes, detail) {
     const src = this._getScratchBuffer(data.length);
     src.set(data);
@@ -469,7 +614,6 @@ export class ImageCoreEngine {
           const p = idx + c;
           const center = src[p];
 
-          // 3x3 ガウシアン近似ローパス（周辺環境輝度の算出）
           const localMean = (
             src[p - stride - 4] + src[p - stride + 4] +
             src[p + stride - 4] + src[p + stride + 4] +
@@ -480,16 +624,13 @@ export class ImageCoreEngine {
           const diff = center - localMean;
           const absDiff = diff < 0 ? -diff : diff;
 
-          // 中間調の重み（白飛び・黒つぶれ付近のハロー現象を抑制）
           const midtoneWeight = 1.0 - Math.abs(center - 128) / 140;
           const safeWeight = midtoneWeight > 0.15 ? midtoneWeight : 0.15;
 
           let delta = 0;
-          // 高解像度化成分: ジャギーを抑えつつ微細境界を復元
           if (superRes > 0 && absDiff >= 2) {
             delta += diff * srGain;
           }
-          // 高精細化成分: マイクロコントラスト（質感・立体感）を強調
           if (detail > 0 && absDiff >= 4) {
             delta += diff * clarityGain * safeWeight;
           }
@@ -503,15 +644,10 @@ export class ImageCoreEngine {
     }
   }
 
-  /**
-   * ★新設: シャープネス処理（1〜10段階）
-   * 3x3 ラプラシアン・ハイパス畳み込みにより、輪郭エッジを段階的に鋭く引き締める
-   */
   _applySharpness10Levels(data, width, height, level) {
     const src = this._getScratchBuffer(data.length);
     src.set(data);
 
-    // 1〜10段階を人間工学的にリニアかつ破綻しない係数 (0.18 〜 2.0) にマッピング
     const amount = level * 0.18 + (level * level) * 0.002;
     const stride = width * 4;
 
@@ -524,7 +660,6 @@ export class ImageCoreEngine {
           const p = idx + c;
           const center = src[p];
 
-          // 8近傍ラプラシアン・ハイパスフィルタ成分
           const neighbors =
             src[p - stride] +
             src[p + stride] +
@@ -532,10 +667,8 @@ export class ImageCoreEngine {
             src[p + 4] +
             ((src[p - stride - 4] + src[p - stride + 4] + src[p + stride - 4] + src[p + stride + 4]) >> 1);
 
-          // 中心画素(重み6)と近傍平均との高周波差分
           const highPass = (center * 6 - neighbors) / 6;
 
-          // 暗部・平坦部の微小JPEGノイズ増幅を防ぐソフトコアリング（閾値2）
           if (highPass > 2 || highPass < -2) {
             const out = center + highPass * amount;
             data[p] = out < 0 ? 0 : (out > 255 ? 255 : out);
@@ -545,9 +678,6 @@ export class ImageCoreEngine {
     }
   }
 
-  /**
-   * 選択された複数領域に対するブロック平均モザイク処理
-   */
   _applyRegionalMosaic(data, width, height, blockSize) {
     const step = Math.max(2, Math.round(blockSize));
 
@@ -594,16 +724,12 @@ export class ImageCoreEngine {
     }
   }
 
-  /**
-   * 処理済み画像の安全なBlob URLエクスポート
-   */
   exportImageBlobUrl(mimeType = 'image/png') {
     return new Promise((resolve, reject) => {
       if (!this.imageLoaded) {
         reject(new Error('画像がありません'));
         return;
       }
-      // 比較プレビュー中であっても確実に処理後の画像を書き出す
       if (this._lastProcessedImageData) {
         this.ctx.putImageData(this._lastProcessedImageData, 0, 0);
       }
