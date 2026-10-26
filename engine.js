@@ -1,10 +1,9 @@
 /**
  * engine.js
  * 画像処理コアエンジン（Swin2SR ディープラーニング推論 + 高精度数式ピクセルパイプライン）
- * 初回同意に基づくオンデマンドAIモデル取得・フォールバック・省メモリ再利用設計
+ * タイムアウト保護・オンデマンドAIロード・メモリ再利用・フォールバック機構搭載
  */
 
-// 8種類の厳選ワンタッチ・プリセット定義
 export const PRESETS = Object.freeze({
   ai_hd: {
     name: '① くっきり高精細',
@@ -80,11 +79,19 @@ export const PRESETS = Object.freeze({
   }
 });
 
-const MAX_FILE_SIZE_BYTES = 35 * 1024 * 1024; // 35MB上限
-const MAX_OUTPUT_DIMENSION = 4096; // 最大4096px
-// Swin2SRモデル推論時のブラウザメモリクラッシュ(OOM)を防ぐ安全入力上限（長辺640px → 出力1280px）
-const MAX_SWIN2SR_INPUT_EDGE = 640;
+const MAX_FILE_SIZE_BYTES = 35 * 1024 * 1024;
+const MAX_OUTPUT_DIMENSION = 4096;
+const MAX_SWIN2SR_INPUT_EDGE = 512;
 const SWIN2SR_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
+
+// 永久待機（ハングアップ）を防ぐ汎用タイムアウトラッパー
+function withTimeout(promise, ms, timeoutMessage = 'Timeout') {
+  let timerId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timerId = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timerId));
+}
 
 export class ImageCoreEngine {
   /**
@@ -97,19 +104,15 @@ export class ImageCoreEngine {
     this.canvas = targetCanvas;
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
 
-    // ユーザーが読み込んだ純粋な元画像（リセット・比較用）
     this.rawSourceCanvas = document.createElement('canvas');
     this.rawSourceCtx = this.rawSourceCanvas.getContext('2d', { willReadFrequently: true });
 
-    // パイプラインの起点となるベース画像（通常は元画像、Swin2SR実行後はAI超解像画像）
     this.sourceCanvas = document.createElement('canvas');
     this.sourceCtx = this.sourceCanvas.getContext('2d', { willReadFrequently: true });
 
-    // ワーク用オフスクリーンバッファ
     this.workCanvas = document.createElement('canvas');
     this.workCtx = this.workCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 超解像・段階補間用の一時キャンバス
     this.stepCanvas = document.createElement('canvas');
     this.stepCtx = this.stepCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -126,62 +129,42 @@ export class ImageCoreEngine {
     this._isProcessing = false;
     this._pendingParams = null;
 
-    // Transformers.js モジュール参照とSwin2SRパイプライン状態
     this._transformersModule = null;
+    this._isV3Runtime = false;
     this._swin2srPipeline = null;
+    this._modelLoadPromise = null;
     // 'unloaded' | 'loading' | 'ready' | 'declined' | 'unavailable'
     this._swin2srState = 'unloaded';
 
     this.runtimeInfo = {
       isWebGPU: false,
-      ortLoaded: false,
-      label: '初期化中...'
+      label: 'WASM High-Precision Ready'
     };
   }
 
   /**
-   * 初回起動時にWebGPU / WASM環境を検出し、Transformers.js ランタイム本体（軽量スクリプト）のみを準備
-   * ※Swin2SRモデル本体（約15〜30MB）はユーザーのYes同意があるまで一切ダウンロードしません
+   * ハードウェア性能（WebGPU対応有無）のみを1.5秒タイムアウト付きで安全に検出
+   * ※外部ネットワーク通信を一切行わないため、起動時にハングアップしません
    */
-  async initializeRuntime() {
-    const hasWebGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
+  async detectHardwareCapabilities() {
     let adapterAvailable = false;
-
-    if (hasWebGPU) {
+    if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
       try {
-        const adapter = await navigator.gpu.requestAdapter();
+        const adapter = await withTimeout(navigator.gpu.requestAdapter(), 1500, 'WebGPU timeout');
         adapterAvailable = Boolean(adapter);
       } catch (_) {
         adapterAvailable = false;
       }
     }
 
-    try {
-      const cdnUrl = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
-      const mod = await import(cdnUrl);
-      if (mod && mod.env) {
-        mod.env.allowLocalModels = false;
-        this._transformersModule = mod;
-        this.runtimeInfo.ortLoaded = true;
-      } else {
-        this._swin2srState = 'unavailable';
-      }
-    } catch (_) {
-      this.runtimeInfo.ortLoaded = false;
-      this._swin2srState = 'unavailable';
-    }
-
     this.runtimeInfo.isWebGPU = adapterAvailable;
     this.runtimeInfo.label = adapterAvailable
-      ? 'WebGPU / AI Engine Ready'
+      ? 'WebGPU / WASM Ready'
       : 'WASM High-Precision Ready';
 
     return this.runtimeInfo;
   }
 
-  /**
-   * Swin2SRモデルの現在の利用可否状態を返す
-   */
   getSwin2SRState() {
     return this._swin2srState;
   }
@@ -190,9 +173,6 @@ export class ImageCoreEngine {
     return this.usingAIUpscaledBase;
   }
 
-  /**
-   * ユーザーがSwin2SRのダウンロードを「No（拒否）」した際の状態更新
-   */
   declineSwin2SRDownload() {
     if (this._swin2srState !== 'ready') {
       this._swin2srState = 'declined';
@@ -200,44 +180,92 @@ export class ImageCoreEngine {
   }
 
   /**
-   * ユーザーが「Yes」を選択した際にSwin2SRモデルをダウンロードし、超解像推論を実行する
-   * @param {Function} onProgress 進捗コールバック
+   * ユーザーが「Yes」を押した後に呼び出されるSwin2SRランタイム＆モデルのダウンロード処理
    */
-  async runSwin2SRSuperResolution(onProgress) {
-    if (!this.imageLoaded) {
-      throw new Error('画像が読み込まれていません');
+  async prepareSwin2SRModel(onProgress) {
+    if (this._swin2srPipeline && this._swin2srState === 'ready') {
+      return true;
     }
-    if (!this._transformersModule || typeof this._transformersModule.pipeline !== 'function') {
-      this._swin2srState = 'unavailable';
-      throw new Error('AI推論ランタイムが読み込まれていません');
+    if (this._modelLoadPromise) {
+      return this._modelLoadPromise;
     }
 
-    // パイプライン未構築の場合はダウンロード＆初期化
-    if (!this._swin2srPipeline) {
-      this._swin2srState = 'loading';
+    this._swin2srState = 'loading';
+
+    this._modelLoadPromise = (async () => {
       try {
+        // 1. Transformers.js ランタイムの動的取得（v3公式CDN → v2フォールバック、15秒タイムアウト）
+        if (!this._transformersModule) {
+          try {
+            const modV3 = await withTimeout(
+              import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2'),
+              15000,
+              'CDN接続タイムアウト'
+            );
+            this._transformersModule = modV3;
+            this._isV3Runtime = true;
+          } catch (_) {
+            const modV2 = await withTimeout(
+              import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js'),
+              15000,
+              'CDN接続タイムアウト'
+            );
+            this._transformersModule = modV2;
+            this._isV3Runtime = false;
+          }
+
+          if (this._transformersModule && this._transformersModule.env) {
+            this._transformersModule.env.allowLocalModels = false;
+          }
+        }
+
+        if (typeof onProgress === 'function') {
+          onProgress({ status: 'runtime' });
+        }
+
+        // 2. Swin2SR モデルのダウンロード＆WASMパイプライン初期化
+        const pipelineOptions = this._isV3Runtime
+          ? {
+              dtype: 'q8',
+              device: 'wasm',
+              progress_callback: (p) => { if (typeof onProgress === 'function') onProgress(p); }
+            }
+          : {
+              quantized: true,
+              progress_callback: (p) => { if (typeof onProgress === 'function') onProgress(p); }
+            };
+
         this._swin2srPipeline = await this._transformersModule.pipeline(
           'image-to-image',
           SWIN2SR_MODEL_ID,
-          {
-            quantized: true,
-            progress_callback: (prog) => {
-              if (typeof onProgress === 'function') onProgress(prog);
-            }
-          }
+          pipelineOptions
         );
+
         this._swin2srState = 'ready';
+        return true;
       } catch (err) {
         this._swin2srState = 'unavailable';
-        throw new Error('モデルのダウンロードまたは初期化に失敗しました');
+        throw err;
+      } finally {
+        this._modelLoadPromise = null;
       }
+    })();
+
+    return this._modelLoadPromise;
+  }
+
+  /**
+   * 準備済みのSwin2SRパイプラインを用いて現在読み込まれている画像を超解像推論する
+   */
+  async runSwin2SRInference() {
+    if (!this.imageLoaded) {
+      throw new Error('画像が読み込まれていません');
+    }
+    if (!this._swin2srPipeline || this._swin2srState !== 'ready') {
+      throw new Error('Swin2SRモデルが準備されていません');
     }
 
-    if (typeof onProgress === 'function') {
-      onProgress({ status: 'inference' });
-    }
-
-    // メモリ保護: 元画像が大きすぎる場合はSwin2SRの安全入力サイズに収めてから推論にかける
+    // ブラウザのメモリ溢れ(OOM)を防ぐため入力長辺を安全サイズに収める
     let inW = this.rawSourceCanvas.width;
     let inH = this.rawSourceCanvas.height;
     if (inW > MAX_SWIN2SR_INPUT_EDGE || inH > MAX_SWIN2SR_INPUT_EDGE) {
@@ -255,14 +283,13 @@ export class ImageCoreEngine {
     inCtx.drawImage(this.rawSourceCanvas, 0, 0, inW, inH);
     const dataUrl = inputCanvas.toDataURL('image/png');
 
-    // UIスレッドを1フレーム解放してから推論実行
-    await new Promise(r => setTimeout(r, 30));
-    const outputRawImage = await this._swin2srPipeline(dataUrl);
+    await new Promise(r => setTimeout(r, 40));
+    const rawResult = await this._swin2srPipeline(dataUrl);
+    const outputRawImage = Array.isArray(rawResult) ? rawResult[0] : rawResult;
 
-    // RawImage (RGB または RGBA) を Canvas ImageData に変換
     const outW = outputRawImage.width;
     const outH = outputRawImage.height;
-    const channels = outputRawImage.channels || (outputRawImage.data.length / (outW * outH));
+    const channels = outputRawImage.channels || Math.round(outputRawImage.data.length / (outW * outH));
     const outImageData = new ImageData(outW, outH);
     const dst = outImageData.data;
     const src = outputRawImage.data;
@@ -288,7 +315,6 @@ export class ImageCoreEngine {
       }
     }
 
-    // ベース画像をSwin2SR推論結果に差し替え
     this.sourceCanvas.width = outW;
     this.sourceCanvas.height = outH;
     this.sourceCtx.putImageData(outImageData, 0, 0);
@@ -302,9 +328,6 @@ export class ImageCoreEngine {
     return { width: outW, height: outH };
   }
 
-  /**
-   * Swin2SR適用状態を解除し、読み込んだ直後の元画像に戻す
-   */
   resetToOriginalSource() {
     if (!this.imageLoaded) return;
     const w = this.rawSourceCanvas.width;
@@ -318,33 +341,23 @@ export class ImageCoreEngine {
     this.usingAIUpscaledBase = false;
   }
 
-  /**
-   * ファイルのバイナリヘッダー（マジックバイト）検査
-   */
   async _verifyMagicBytes(file) {
     const slice = file.slice(0, 12);
     const buffer = await slice.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     if (bytes.length < 4) return false;
 
-    // JPEG: FF D8 FF
     if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return true;
-    // PNG: 89 50 4E 47
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return true;
-    // WebP: "RIFF" .... "WEBP"
     if (
       bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
       bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
     ) return true;
-    // BMP: "BM"
     if (bytes[0] === 0x42 && bytes[1] === 0x4D) return true;
 
     return false;
   }
 
-  /**
-   * 画像ファイルの厳格な検証とデコード読み込み
-   */
   async loadImage(file) {
     if (!file || !(file instanceof Blob)) {
       throw new Error('ファイルが選択されていません');
@@ -381,13 +394,11 @@ export class ImageCoreEngine {
       this.originalWidth = w;
       this.originalHeight = h;
 
-      // 元画像の保存
       this.rawSourceCanvas.width = w;
       this.rawSourceCanvas.height = h;
       this.rawSourceCtx.clearRect(0, 0, w, h);
       this.rawSourceCtx.drawImage(bitmap, 0, 0, w, h);
 
-      // パイプライン起点キャンバスへコピー
       this.sourceCanvas.width = w;
       this.sourceCanvas.height = h;
       this.sourceCtx.clearRect(0, 0, w, h);
@@ -432,7 +443,6 @@ export class ImageCoreEngine {
     return this._scratchBuffer;
   }
 
-  // ====== モザイク領域管理 ======
   addMosaicRegion(normRect) {
     const x = Math.max(0, Math.min(1, Number(normRect.x) || 0));
     const y = Math.max(0, Math.min(1, Number(normRect.y) || 0));
@@ -455,7 +465,6 @@ export class ImageCoreEngine {
     return this.mosaicRegions;
   }
 
-  // ====== Before / After 比較プレビュー機能 ======
   renderOriginalPreview() {
     if (!this.imageLoaded) return;
     const w = this.canvas.width;
@@ -464,7 +473,6 @@ export class ImageCoreEngine {
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.imageSmoothingQuality = 'high';
     this.ctx.clearRect(0, 0, w, h);
-    // 常に最初期の純粋な元画像と比較できるようにする
     this.ctx.drawImage(this.rawSourceCanvas, 0, 0, w, h);
     this.ctx.restore();
   }
@@ -474,9 +482,6 @@ export class ImageCoreEngine {
     this.ctx.putImageData(this._lastProcessedImageData, 0, 0);
   }
 
-  /**
-   * 画像処理パイプラインの統合実行（非同期排他ロック付き）
-   */
   async process(rawParams = {}) {
     if (!this.imageLoaded) {
       throw new Error('画像が読み込まれていません');
@@ -509,7 +514,7 @@ export class ImageCoreEngine {
     const sharpness = Math.min(10, Math.max(0, Math.round(Number(rawParams.sharpness) || 0)));
     const brightness = Math.min(100, Math.max(-100, Math.round(Number(rawParams.brightness) || 0)));
     const contrast = Math.min(100, Math.max(-100, Math.round(Number(rawParams.contrast) || 0)));
-    const mosaicSize = Math.min(100, Math.max(2, Math.round(Number(rawParams.mosaicSize) || 15));
+    const mosaicSize = Math.min(100, Math.max(2, Math.round(Number(rawParams.mosaicSize) || 15)));
 
     let targetW = Math.max(1, Math.round(this.originalWidth * scale));
     let targetH = Math.max(1, Math.round(this.originalHeight * scale));
@@ -520,28 +525,23 @@ export class ImageCoreEngine {
       targetH = Math.max(1, Math.round(targetH * limitRatio));
     }
 
-    // 1. サイズ変更と高解像度ステップ補間 (機能① & 機能③)
     this._stepResizeAndSuperRes(targetW, targetH, superRes);
 
     const imageData = this.workCtx.getImageData(0, 0, targetW, targetH);
     const data = imageData.data;
 
-    // 2. 明るさ・コントラスト調整 (機能④)
     if (brightness !== 0 || contrast !== 0) {
       this._applyBrightnessContrastLUT(data, brightness, contrast);
     }
 
-    // 3. 高解像度ディテール復元 + 高精細化マイクロコントラスト強調 (機能① & 機能②)
     if (superRes > 0 || detail > 0) {
       this._applyHighDefinitionClarity(data, targetW, targetH, superRes, detail);
     }
 
-    // 4. シャープネス 1〜10段階 (3x3 ラプラシアン・ハイパス畳み込み)
     if (sharpness >= 1) {
       this._applySharpness10Levels(data, targetW, targetH, sharpness);
     }
 
-    // 5. 範囲指定モザイク処理 (機能⑤)
     if (this.mosaicRegions.length > 0 && mosaicSize >= 2) {
       this._applyRegionalMosaic(data, targetW, targetH, mosaicSize);
     }
