@@ -211,11 +211,14 @@ function syncSwin2SRUI() {
   } else if (state === 'declined') {
     els.swin2srBadge.textContent = '利用しない設定 (DLスキップ)';
     els.swin2srBadge.classList.add('status-declined');
+  } else if (state === 'error') {
+    els.swin2srBadge.textContent = '取得失敗 (再試行可)';
+    els.swin2srBadge.classList.add('status-declined');
   } else if (state === 'unavailable') {
     els.swin2srBadge.textContent = '利用不可 (数式エンジンのみ)';
     els.swin2srBadge.classList.add('status-declined');
   } else {
-    els.swin2srBadge.textContent = '未取得 (初回DL約21〜54MB)';
+    els.swin2srBadge.textContent = '未取得 (初回DL・キャッシュ保存)';
     els.swin2srBadge.classList.add('status-unloaded');
   }
 
@@ -223,6 +226,8 @@ function syncSwin2SRUI() {
     els.btnSwin2sr.textContent = '⏳ Swin2SR モデルを準備中...';
   } else if (!hasImg) {
     els.btnSwin2sr.textContent = '🧠 AI超解像 (Swin2SR ×2) を実行';
+  } else if (state === 'error') {
+    els.btnSwin2sr.textContent = '🔄 AI超解像 (Swin2SR ×2) を再試行';
   } else if (hasCache) {
     els.btnSwin2sr.textContent = '🔄 AI超解像 (Swin2SR ×2) を再実行';
   } else {
@@ -673,13 +678,31 @@ async function executeSwin2SRDownloadAndRun(askShrink = true) {
   syncSwin2SRUI();
 
   const progressCallback = (prog) => {
-    if (prog.status === 'progress' && typeof prog.progress === 'number') {
-      const pct = Math.min(100, Math.max(0, Math.round(prog.progress)));
+    if (!prog || typeof prog !== 'object') return;
+    if (prog.status === 'state') {
+      syncSwin2SRUI();
+      updateEngineBadge();
+      return;
+    }
+    if (prog.status === 'initiate' || prog.status === 'download') {
+      const isOnnx = typeof prog.file === 'string' && prog.file.endsWith('.onnx');
+      els.aiProgressText.textContent = isOnnx ? 'Swin2SRモデルをダウンロード中...' : 'モデル設定ファイルを取得中...';
+    } else if (prog.status === 'progress' && typeof prog.progress === 'number') {
+      const pct = Math.min(99, Math.max(0, Math.round(prog.progress)));
       els.aiProgressFill.style.width = `${pct}%`;
-      els.aiProgressText.textContent = `モデル準備中... ${pct}%`;
+      if (typeof prog.loaded === 'number' && typeof prog.total === 'number' && prog.total > 0) {
+        const mbLoaded = (prog.loaded / (1024 * 1024)).toFixed(1);
+        const mbTotal = (prog.total / (1024 * 1024)).toFixed(1);
+        els.aiProgressText.textContent = `モデルダウンロード中... ${pct}% (${mbLoaded} / ${mbTotal} MB)`;
+      } else {
+        els.aiProgressText.textContent = `モデル準備中... ${pct}%`;
+      }
+    } else if (prog.status === 'init_session') {
+      els.aiProgressFill.style.width = '100%';
+      els.aiProgressText.textContent = 'ONNXモデルを初期化中...';
     } else if (prog.status === 'inference') {
       els.aiProgressFill.style.width = '100%';
-      els.aiProgressText.textContent = 'Swin2SR AI超解像推論を実行中...';
+      els.aiProgressText.textContent = 'Swin2SR AI超解像を実行中...';
       els.processingText.textContent = `Swin2SR AI超解像推論中 (${engine.runtimeInfo.aiBackend === 'webgpu' ? 'WebGPU' : 'WASM'})...`;
     }
   };
@@ -707,7 +730,7 @@ async function executeSwin2SRDownloadAndRun(askShrink = true) {
       showToast('Swin2SR AIモデルの準備が完了しました！画像を開いて実行できます');
     }
   } catch (err) {
-    showToast(`Swin2SRを実行できないため数式処理のみ利用します (${err.message})`, 4500);
+    showToast(`Swin2SRを準備または実行できませんでした (${err.message})`, 5000);
   } finally {
     if (loadingActive) endLoading();
     els.aiProgressWrap.classList.add('hidden');

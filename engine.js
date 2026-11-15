@@ -90,8 +90,6 @@ export const MAX_OUTPUT_DIMENSION = 4096; // 出力・内部保持の最大長�
 export const MAX_SWIN2SR_INPUT_EDGE = 640; // Swin2SR ブラウザ推論時の安全入力上限
 const SWIN2SR_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
 const CONSENT_STORAGE_KEY = 'proimage_studio_swin2sr_consent_v1';
-const LOCAL_TRANSFORMERS_URL = './libs/transformers.min.js';
-const CDN_TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js';
 
 export class ImageCoreEngine {
   /**
@@ -142,11 +140,13 @@ export class ImageCoreEngine {
     this._workerJobSeq = 0;
     this._workerCallbacks = new Map();
 
-    // Swin2SR ランタイム状態
-    this._transformersModule = null;
-    this._swin2srPipeline = null;
+    // Swin2SR AI Worker ランタイム状態（メインスレッド非ブロック＋ヒープ分離）
+    this._aiWorker = null;
+    this._aiWorkerJobSeq = 0;
+    this._aiWorkerCallbacks = new Map();
+    this._swin2srReady = false;
     this._swin2srLoadPromise = null;
-    /** @type {'unloaded' | 'loading' | 'ready' | 'declined' | 'unavailable'} */
+    /** @type {'unloaded' | 'loading' | 'ready' | 'declined' | 'error' | 'unavailable'} */
     this._swin2srState = 'unloaded';
     this._swin2srActiveDtype = null;
 
@@ -222,46 +222,29 @@ export class ImageCoreEngine {
   }
 
   /**
-   * ローカル libs/ を最優先し、失敗時のみ CDN から Transformers.js v3 を読み込む。
+   * AI専用 Worker 上で Transformers.js v3 の利用可否を事前検証する。
    */
   async _loadTransformersRuntime() {
-    if (this._transformersModule) return true;
+    if (this.runtimeInfo.ortLoaded && this._aiWorker) return true;
+    if (typeof Worker === 'undefined') {
+      this.runtimeInfo.ortLoaded = false;
+      this.runtimeInfo.aiBackend = 'unavailable';
+      this._swin2srState = 'unavailable';
+      return false;
+    }
 
-    let mod = null;
     try {
-      mod = await import(LOCAL_TRANSFORMERS_URL);
-    } catch (_) {
-      try {
-        mod = await Promise.race([
-          import(CDN_TRANSFORMERS_URL),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('CDN Timeout')), 8000))
-        ]);
-      } catch (_) {
-        mod = null;
-      }
-    }
-
-    if (mod && mod.env && typeof mod.pipeline === 'function') {
-      mod.env.allowLocalModels = false;
-      if (mod.env.backends?.onnx?.wasm) {
-        // ローカル配置された v3 互換 JSEP / WASM バイナリのディレクトリを指定
-        mod.env.backends.onnx.wasm.wasmPaths = new URL('./libs/', import.meta.url).href;
-        // SharedArrayBuffer が使えない通常環境では明示的に numThreads = 1 にしてフォールバック遅延を防ぐ
-        const canMultiThread = typeof self !== 'undefined' && Boolean(self.crossOriginIsolated);
-        mod.env.backends.onnx.wasm.numThreads = canMultiThread
-          ? Math.min(4, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 2)
-          : 1;
-      }
-      this._transformersModule = mod;
+      await this._postAIWorker({ type: 'probe' });
       this.runtimeInfo.ortLoaded = true;
-      this.runtimeInfo.aiBackend = this.runtimeInfo.renderBackend === 'webgpu' ? 'webgpu' : 'wasm';
+      this.runtimeInfo.aiBackend = 'wasm';
       return true;
+    } catch (_) {
+      this._terminateAIWorker();
+      this.runtimeInfo.ortLoaded = false;
+      this.runtimeInfo.aiBackend = 'unavailable';
+      this._swin2srState = 'unavailable';
+      return false;
     }
-
-    this.runtimeInfo.ortLoaded = false;
-    this.runtimeInfo.aiBackend = 'unavailable';
-    this._swin2srState = 'unavailable';
-    return false;
   }
 
   _updateRuntimeLabel() {
@@ -271,10 +254,75 @@ export class ImageCoreEngine {
       'cpu-worker': 'CPU (Worker)'
     };
     const rLabel = renderMap[this.runtimeInfo.renderBackend] || 'CPU (Worker)';
-    const aiTag = this.runtimeInfo.aiBackend === 'webgpu'
-      ? 'AI: WebGPU'
-      : (this.runtimeInfo.aiBackend === 'wasm' ? 'AI: WASM' : 'AI: 待機');
+    let aiTag = 'AI: 待機';
+    if (this.runtimeInfo.aiBackend === 'webgpu') {
+      aiTag = 'AI: WebGPU';
+    } else if (this.runtimeInfo.aiBackend === 'wasm') {
+      aiTag = this._swin2srState === 'error' ? 'AI: エラー' : 'AI: WASM';
+    }
     this.runtimeInfo.label = `${rLabel} / ${aiTag}`;
+  }
+
+  _initAIWorker() {
+    if (this._aiWorker) return this._aiWorker;
+    const worker = new Worker('./ai-worker.js', { type: 'module' });
+    worker.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object') return;
+      const cb = this._aiWorkerCallbacks.get(msg.jobId);
+      if (!cb) return;
+
+      if (msg.type === 'progress') {
+        if (typeof cb.onProgress === 'function') {
+          cb.onProgress(msg.progress);
+        }
+        return;
+      }
+
+      this._aiWorkerCallbacks.delete(msg.jobId);
+      if (msg.ok) {
+        cb.resolve(msg);
+      } else {
+        cb.reject(new Error(msg.error || 'AI Worker処理エラー'));
+      }
+    };
+    worker.onerror = (err) => {
+      const message = err?.message || 'AI Worker実行エラー';
+      for (const [, cb] of this._aiWorkerCallbacks) {
+        cb.reject(new Error(message));
+      }
+      this._aiWorkerCallbacks.clear();
+      this._terminateAIWorker();
+    };
+    this._aiWorker = worker;
+    return worker;
+  }
+
+  /**
+   * 障害やフォールバック時に現在の AI Worker を強制破棄し、WASM/ORT ヒープ状態を完全にリセットする。
+   */
+  _terminateAIWorker() {
+    if (this._aiWorker) {
+      for (const [, cb] of this._aiWorkerCallbacks) {
+        cb.reject(new Error('AI Workerがリセットされました'));
+      }
+      this._aiWorkerCallbacks.clear();
+      try { this._aiWorker.terminate(); } catch (_) {}
+      this._aiWorker = null;
+    }
+    this._swin2srReady = false;
+  }
+
+  /**
+   * AI Worker へジョブを投入して結果を待機する。
+   */
+  _postAIWorker(payload, transfer = [], onProgress = null) {
+    const worker = this._initAIWorker();
+    const jobId = ++this._aiWorkerJobSeq;
+    return new Promise((resolve, reject) => {
+      this._aiWorkerCallbacks.set(jobId, { resolve, reject, onProgress });
+      worker.postMessage({ ...payload, jobId }, transfer);
+    });
   }
 
   _initWorker() {
@@ -379,7 +427,7 @@ export class ImageCoreEngine {
    * @returns {Promise<boolean>}
    */
   async downloadSwin2SRModel(onProgress) {
-    if (this._swin2srPipeline) {
+    if (this._swin2srReady && this._aiWorker) {
       this._swin2srState = 'ready';
       return true;
     }
@@ -388,58 +436,39 @@ export class ImageCoreEngine {
     }
 
     const loaded = await this._loadTransformersRuntime();
-    if (!loaded || !this._transformersModule) {
+    if (!loaded) {
       this._swin2srState = 'unavailable';
       throw new Error('AI推論ランタイムを読み込めませんでした');
     }
 
     this._swin2srState = 'loading';
-    const fileTotals = new Map();
-    const fileLoaded = new Map();
-
-    const wrappedProgress = (prog) => {
-      if (typeof onProgress !== 'function') return;
-      if (prog && prog.status === 'progress' && prog.file) {
-        if (typeof prog.total === 'number' && prog.total > 0) {
-          fileTotals.set(prog.file, prog.total);
-          fileLoaded.set(prog.file, prog.loaded || 0);
-          let sumTotal = 0;
-          let sumLoaded = 0;
-          for (const [f, t] of fileTotals) {
-            sumTotal += t;
-            sumLoaded += fileLoaded.get(f) || 0;
-          }
-          const combinedPct = sumTotal > 0 ? Math.min(99, Math.round((sumLoaded / sumTotal) * 100)) : Math.round(prog.progress || 0);
-          onProgress({ ...prog, progress: combinedPct });
-          return;
-        }
-      }
-      onProgress(prog);
-    };
+    if (typeof onProgress === 'function') {
+      onProgress({ status: 'state', state: 'loading' });
+    }
 
     const loadTask = (async () => {
-      const candidates = [];
-      if (this.runtimeInfo.renderBackend === 'webgpu') {
-        if (this.runtimeInfo.webgpuF16) {
-          candidates.push({ device: 'webgpu', dtype: 'fp16' });
-        }
-        candidates.push({ device: 'webgpu', dtype: 'fp32' });
-      }
-      candidates.push({ device: 'wasm', dtype: 'q8' });
+      // Swin2SR (約10,671ノード) は WebGPU fp16 で ORT C++ セッション構築が失敗してランタイム状態を破壊し、
+      // WebGPU fp32 もノード間同期により WASM 比 6〜12倍低速となるため、分離された Worker 上の WASM 量子化 (q8) を最優先とし、
+      // 万一 q8 が失敗した場合は Worker を再生成してクリーンなヒープ上で fp32 へフォールバックする。
+      const candidates = [
+        { device: 'wasm', dtype: 'q8' },
+        { device: 'wasm', dtype: 'fp32' }
+      ];
 
       let lastErr = null;
       for (const opt of candidates) {
         try {
-          const pipe = await this._transformersModule.pipeline(
-            'image-to-image',
-            SWIN2SR_MODEL_ID,
+          await this._postAIWorker(
             {
+              type: 'load',
+              modelId: SWIN2SR_MODEL_ID,
               device: opt.device,
-              dtype: opt.dtype,
-              progress_callback: wrappedProgress
-            }
+              dtype: opt.dtype
+            },
+            [],
+            onProgress
           );
-          this._swin2srPipeline = pipe;
+          this._swin2srReady = true;
           this._swin2srState = 'ready';
           this._swin2srActiveDtype = opt.dtype;
           this.runtimeInfo.aiBackend = opt.device;
@@ -447,15 +476,18 @@ export class ImageCoreEngine {
           return true;
         } catch (err) {
           lastErr = err;
-          fileTotals.clear();
-          fileLoaded.clear();
+          // 失敗時の WASM/ORT ヒープ汚染を引き継がないよう Worker ごと破棄する
+          this._terminateAIWorker();
         }
       }
 
-      this._swin2srState = 'unavailable';
-      this.runtimeInfo.aiBackend = 'unavailable';
+      // 一時的な通信断等でも再試行できるよう 'error' 状態にする
+      this._swin2srReady = false;
+      this._swin2srState = 'error';
+      this.runtimeInfo.aiBackend = 'wasm';
       this._updateRuntimeLabel();
-      throw new Error(lastErr?.message || 'Swin2SRモデルのダウンロードに失敗しました');
+      const detail = lastErr?.message || (typeof lastErr === 'number' ? `WASM例外 code=${lastErr}` : String(lastErr || ''));
+      throw new Error(detail || 'Swin2SRモデルの準備に失敗しました');
     })();
 
     this._swin2srLoadPromise = loadTask;
@@ -515,7 +547,7 @@ export class ImageCoreEngine {
     const genAtStart = this._imageGeneration;
     const myJobSeq = ++this._aiJobSeq;
 
-    if (!this._swin2srPipeline) {
+    if (!this._swin2srReady || !this._aiWorker) {
       await this.downloadSwin2SRModel(onProgress);
     }
 
@@ -543,7 +575,7 @@ export class ImageCoreEngine {
     const inImageData = inCtx.getImageData(0, 0, inW, inH);
     const rgba = inImageData.data;
 
-    // 透過の有無を検出しつつ RGB 3ch バッファを作成
+    // 透過の有無を検出しつつ RGB 3ch バッファを作成（Transferableでゼロコピー転送）
     const rgbBytes = new Uint8ClampedArray(inW * inH * 3);
     let hasTransparency = false;
     for (let s = 0, d = 0; s < rgba.length; s += 4, d += 3) {
@@ -553,32 +585,15 @@ export class ImageCoreEngine {
       if (rgba[s + 3] < 255) hasTransparency = true;
     }
 
-    const { RawImage } = this._transformersModule;
-    const rawInput = new RawImage(rgbBytes, inW, inH, 3);
-
-    // UIスレッドでスピナーを描画させるため1フレーム譲る
-    await new Promise(r => setTimeout(r, 20));
-
-    let outputRawImage = null;
-    try {
-      outputRawImage = await this._swin2srPipeline(rawInput);
-    } catch (err) {
-      // WebGPU推論実行時に演算子エラー等が起きた場合は WASM (q8) へ安全にフォールバックして再実行
-      if (this.runtimeInfo.aiBackend === 'webgpu') {
-        this._swin2srPipeline = null;
-        this._swin2srPipeline = await this._transformersModule.pipeline(
-          'image-to-image',
-          SWIN2SR_MODEL_ID,
-          { device: 'wasm', dtype: 'q8', progress_callback: onProgress }
-        );
-        this.runtimeInfo.aiBackend = 'wasm';
-        this._swin2srActiveDtype = 'q8';
-        this._updateRuntimeLabel();
-        outputRawImage = await this._swin2srPipeline(rawInput);
-      } else {
-        throw err;
-      }
-    }
+    const inferRes = await this._postAIWorker(
+      {
+        type: 'infer',
+        width: inW,
+        height: inH,
+        rgbBuffer: rgbBytes.buffer
+      },
+      [rgbBytes.buffer]
+    );
 
     // 推論待機中に画像が切り替わったりキャンセルされた場合は結果を破棄
     if (genAtStart !== this._imageGeneration || myJobSeq !== this._aiJobSeq) {
@@ -587,12 +602,12 @@ export class ImageCoreEngine {
       return { width: 0, height: 0, cancelled: true };
     }
 
-    const outW = outputRawImage.width;
-    const outH = outputRawImage.height;
-    const channels = outputRawImage.channels || (outputRawImage.data.length / (outW * outH));
+    const outW = inferRes.width;
+    const outH = inferRes.height;
+    const src = new Uint8ClampedArray(inferRes.buffer);
+    const channels = inferRes.channels || (src.length / (outW * outH));
     const outImageData = new ImageData(outW, outH);
     const dst = outImageData.data;
-    const src = outputRawImage.data;
 
     if (channels === 4) {
       dst.set(src);
@@ -1110,5 +1125,6 @@ export class ImageCoreEngine {
       this._worker.terminate();
       this._worker = null;
     }
+    this._terminateAIWorker();
   }
 }
